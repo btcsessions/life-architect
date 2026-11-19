@@ -19,6 +19,10 @@ One deck for everything on your plate, served from your Umbrel and reached over 
   handed to the same person three times. Gmail itself is never changed.
 - **Money** (PIN): import bank and card statements (PDF or CSV; PDFs are read on the Umbrel and shown for checking first), see where it goes, drill into categories, spot subscriptions.
   The Money model only ever sees merchant names.
+  Money moving between your own accounts (chequing to savings, a card payment) is matched and counted as neither
+  spending nor income. Bitcoin wallets can be added by public key (xpub, ypub, zpub): balances at today's price,
+  each receipt valued in CAD on the day it confirmed, and moves between your own wallets shown as transfers.
+  Addresses are only sent to the address server you set, which should be your own node.
 - **People** (PIN): relationships you're building and scenarios you're working toward, with notes that can't be
   rewritten, word-for-word quotes, open questions, readings with graded claims, and a research library.
   It uses only its own model. The deck and the relay show "People: something due" and nothing else.

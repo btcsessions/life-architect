@@ -123,8 +123,8 @@ describe("money", () => {
       expect(called).toBe(0); // no model, no network
       expect((await (await app.request("/api/money/summary?month=2026-11", { headers: h })).json()).out).toBe(0); // nothing saved yet
       const save = (rows: unknown) => app.request("/api/money/import-rows", { method: "POST", headers: { ...h, ...J }, body: JSON.stringify({ rows, account: "Visa" }) });
-      expect(await (await save(read.rows)).json()).toEqual({ added: 4, already_there: 0 });
-      expect(await (await save(read.rows)).json()).toEqual({ added: 0, already_there: 4 });
+      expect(await (await save(read.rows)).json()).toMatchObject({ added: 4, already_there: 0 });
+      expect(await (await save(read.rows)).json()).toMatchObject({ added: 0, already_there: 4 });
       expect((await save([{ day: "nonsense", description: "x", amount: 1 }])).status).toBe(400);
       const junk = new FormData(); junk.set("file", new File(["not a pdf"], "x.pdf"));
       expect((await app.request("/api/money/read-pdf", { method: "POST", headers: h, body: junk })).status).toBe(400);

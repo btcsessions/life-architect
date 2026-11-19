@@ -319,5 +319,5 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
   openAsks = asks.open;
   commands = mountCommands(app, ctx, { addTx: money.addTx, peopleDrop: people.drop });
 
-  return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected });
+  return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected, syncBtc: money.syncBtc, hasWallets: money.hasWallets });
 }

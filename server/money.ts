@@ -6,6 +6,10 @@ import { chat, extractJson } from "./file.ts";
 import { mountLock } from "./lock.ts";
 import { saveFile, serve, deleteFile, type StoredFile } from "./files.ts";
 import { pdfLines, readStatement } from "./pdf.ts";
+import { mountBtc } from "./btc.ts";
+
+// Words that suggest a line is money moving between your own accounts rather than being earned or spent.
+const TRANSFERISH = /transfer|tfr|xfer|payment|pymt|pmt|thank you|visa|mastercard|master card|amex|credit card|savings|chequing|checking|to acct|from acct|online banking|bill pay/i;
 
 const PDF_RULES = `You read the text of a bank or credit card statement and list its transactions.
 Reply with ONLY a JSON array of {"day":"YYYY-MM-DD","description":"as printed","amount":number}. amount is negative for money leaving (purchases, withdrawals, fees) and positive for money arriving (deposits, refunds, payments to a card).
@@ -155,7 +159,35 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     CREATE TABLE IF NOT EXISTS money_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, merchant TEXT NOT NULL UNIQUE, category TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS money_assets (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, kind TEXT NOT NULL, value REAL NOT NULL, updated_at TEXT NOT NULL);
   `);
+  for (const [col, type] of [["pair_id", "INTEGER"], ["sats", "INTEGER"], ["txid", "TEXT"], ["wallet_id", "INTEGER"], ["keep_cat", "INTEGER NOT NULL DEFAULT 0"]] as const)
+    if (!(db.prepare("PRAGMA table_info(money_tx)").all() as Array<{ name: string }>).some((c) => c.name === col)) db.exec(`ALTER TABLE money_tx ADD COLUMN ${col} ${type}`);
   mountLock(app, ctx, "money");
+
+  /**
+   * Find money that left one of your accounts and arrived in another: the same amount, opposite direction,
+   * different accounts, within four days, where at least one side reads like a transfer or card payment.
+   * Both sides become Transfers, so they count as neither spending nor income. Returns how many pairs were made.
+   */
+  function linkTransfers(): number {
+    const free = db.prepare("SELECT * FROM money_tx WHERE pair_id IS NULL AND wallet_id IS NULL AND account IS NOT NULL AND keep_cat = 0 ORDER BY day, id").all() as Array<Tx & { pair_id: number | null }>;
+    const ins = free.filter((t) => t.amount > 0), taken = new Set<number>();
+    const gap = (a: string, b: string) => Math.abs(new Date(a).getTime() - new Date(b).getTime()) / 86_400_000;
+    let made = 0;
+    db.transaction(() => {
+      for (const out of free.filter((t) => t.amount < 0)) {
+        const match = ins
+          .filter((i) => !taken.has(i.id) && i.account !== out.account && Math.abs(i.amount + out.amount) < 0.005 && gap(i.day, out.day) <= 4)
+          .filter((i) => TRANSFERISH.test(out.description) || TRANSFERISH.test(i.description) || out.category === "Transfers" || i.category === "Transfers")
+          .sort((a, b) => gap(a.day, out.day) - gap(b.day, out.day))[0];
+        if (!match) continue;
+        taken.add(match.id);
+        db.prepare("UPDATE money_tx SET category = 'Transfers', pair_id = ? WHERE id = ?").run(match.id, out.id);
+        db.prepare("UPDATE money_tx SET category = 'Transfers', pair_id = ? WHERE id = ?").run(out.id, match.id);
+        made++;
+      }
+    })();
+    return made;
+  }
 
   const categorise = (description: string, merchant: string, amount: number): string => {
     const own = db.prepare("SELECT category FROM money_rules WHERE merchant = ?").get(merchant.toLowerCase()) as { category: string } | undefined;
@@ -195,7 +227,8 @@ export function mountMoney(app: Hono, ctx: Ctx) {
         if (addTx(r.day, r.description, r.amount, account, { nth })) added++;
       }
     })();
-    return c.json({ added, already_there: rows.length - added, unreadable, from: rows.reduce((a, r) => (r.day < a ? r.day : a), rows[0].day), to: rows.reduce((a, r) => (r.day > a ? r.day : a), rows[0].day) });
+    const transfers = linkTransfers();
+    return c.json({ added, already_there: rows.length - added, unreadable, transfers, from: rows.reduce((a, r) => (r.day < a ? r.day : a), rows[0].day), to: rows.reduce((a, r) => (r.day > a ? r.day : a), rows[0].day) });
   });
 
   // Read a PDF statement and show what was found. Nothing is saved until the rows come back to /import-rows.
@@ -249,7 +282,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
         if (addTx(r.day, r.description, r.amount, account, { nth })) added++;
       }
     })();
-    return c.json({ added, already_there: rows.length - added });
+    return c.json({ added, already_there: rows.length - added, transfers: linkTransfers() });
   });
 
   // One transaction by hand, or from a receipt.
@@ -270,7 +303,8 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     if (amount === null || amount === 0) return c.json({ error: "Enter the amount." }, 400);
     if (!description) return c.json({ error: "Say what it was for." }, 400);
     const signed = b.kind === "in" ? Math.abs(amount) : -Math.abs(amount);
-    if (!addTx(day, description, signed, "By hand", { file_id: fileId })) return c.json({ error: "That exact entry is already there." }, 409);
+    if (!addTx(day, description, signed, String(b.account ?? "").trim().slice(0, 60) || "By hand", { file_id: fileId })) return c.json({ error: "That exact entry is already there." }, 409);
+    linkTransfers();
     return c.json({ ok: true });
   });
 
@@ -346,8 +380,13 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     const month = c.req.query("month") ?? "";
     if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ error: "Say which month." }, 400);
     const cat = c.req.query("category"), merchant = c.req.query("merchant");
-    return c.json({ categories: CATEGORIES, tx: inMonth(month).filter((t) => (!cat || t.category === cat) && (!merchant || t.merchant === merchant)) });
+    const other = db.prepare("SELECT account, day FROM money_tx WHERE id = ?");
+    const tx = inMonth(month).filter((t) => (!cat || t.category === cat) && (!merchant || t.merchant === merchant))
+      .map((t: any) => ({ ...t, pair: t.pair_id ? other.get(t.pair_id) ?? null : null }));
+    return c.json({ categories: CATEGORIES, accounts: accounts(), tx });
   });
+
+  const accounts = () => (db.prepare("SELECT account, count(*) AS n, min(day) AS first, max(day) AS last FROM money_tx WHERE account IS NOT NULL GROUP BY account ORDER BY account").all() as Array<{ account: string }>);
 
   // Re-sort one transaction; with "always", every one from that merchant, now and in future.
   app.patch("/api/money/tx/:id", async (c) => {
@@ -355,7 +394,17 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     const t = db.prepare("SELECT * FROM money_tx WHERE id = ?").get(id) as Tx | undefined;
     if (!t) return c.json({ error: "That transaction is gone." }, 404);
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if (typeof b.note === "string") db.prepare("UPDATE money_tx SET note = ? WHERE id = ?").run(b.note.trim().slice(0, 300) || null, id);
+    if (b.category === undefined && typeof b.note === "string") return c.json({ ok: true });
     if (!CATEGORIES.includes(b.category as string)) return c.json({ error: "Pick a category." }, 400);
+    // His choice sticks: automatic matching won't change it back, and a wrongly matched pair is split.
+    db.prepare("UPDATE money_tx SET keep_cat = 1 WHERE id = ?").run(id);
+    const pair = (t as any).pair_id as number | null;
+    if (pair && b.category !== "Transfers") {
+      db.prepare("UPDATE money_tx SET pair_id = NULL WHERE id IN (?, ?)").run(id, pair);
+      const o = db.prepare("SELECT * FROM money_tx WHERE id = ?").get(pair) as Tx | undefined;
+      if (o && !(o as any).keep_cat && !(o as any).wallet_id) db.prepare("UPDATE money_tx SET category = ? WHERE id = ?").run(categorise(o.description, o.merchant, o.amount) === "Transfers" ? "Transfers" : o.amount > 0 ? "Income" : "Other", pair);
+    }
     if (b.always) {
       db.prepare("INSERT INTO money_rules (merchant, category) VALUES (?, ?) ON CONFLICT(merchant) DO UPDATE SET category = excluded.category").run(t.merchant.toLowerCase(), b.category);
       db.prepare("UPDATE money_tx SET category = ? WHERE merchant = ?").run(b.category, t.merchant);
@@ -413,5 +462,6 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     return db.prepare("UPDATE money_assets SET value = ?, updated_at = ? WHERE id = ?").run(value, ctx.day(), Number(c.req.param("id"))).changes ? c.json({ ok: true }) : c.json({ error: "No such entry." }, 404);
   });
   app.delete("/api/money/assets/:id", (c) => (db.prepare("DELETE FROM money_assets WHERE id = ?").run(Number(c.req.param("id"))).changes ? c.json({ ok: true }) : c.json({ error: "No such entry." }, 404)));
-  return { addTx };
+  const wallets = mountBtc(app, ctx, linkTransfers);
+  return { addTx, syncBtc: wallets.sync, hasWallets: wallets.hasWallets };
 }

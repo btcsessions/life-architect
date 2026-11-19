@@ -11,7 +11,7 @@ interface Summary {
   categories: Category[]; income: Group[]; savings: Array<{ text: string; amount: number }>;
   tasks: Array<{ id: number; title: string; due: string | null }>; count: number; unsorted: number; has_model: boolean;
 }
-interface Tx { id: number; day: string; description: string; merchant: string; amount: number; category: string; account: string | null; file_id: number | null }
+interface Tx { id: number; day: string; description: string; merchant: string; amount: number; category: string; account: string | null; file_id: number | null; note: string | null; sats: number | null; pair: { account: string | null; day: string } | null }
 interface Asset { id: number; name: string; kind: string; value: number; updated_at: string }
 type Props = { onBack: () => void; onError: (m: string) => void };
 
@@ -139,6 +139,7 @@ function Dashboard({ s, onBack, onError }: { s: Session } & Props) {
         </>
       )}
 
+      <Bitcoin s={s} onChanged={load} onError={onError} />
       <Feed s={s} onDone={(m) => { setNote(m); setMonth(undefined); load(); }} onError={onError} />
       {empty && note && <p className="small electro" role="status">{note}</p>}
     </div>
@@ -162,16 +163,25 @@ function Transactions({ s, month, category, onChanged, onError }: { s: Session; 
   useEffect(() => { load(); }, [load]);
   if (!data) return <p className="muted">Loading…</p>;
   const resort = async (t: Tx, cat: string) => {
-    const always = window.confirm(`Put everything from "${t.merchant}" in ${cat} from now on?\n\nOK: always. Cancel: just this one.`);
+    const always = t.sats === null && window.confirm(`Put everything from "${t.merchant}" in ${cat} from now on?\n\nOK: always. Cancel: just this one.`);
     try { await s.call(`/api/money/tx/${t.id}`, json("PATCH", { category: cat, always })); await load(); onChanged(); } catch (e) { onError((e as Error).message); }
   };
+  const [labelling, setLabelling] = useState<number | null>(null);
+  const [label, setLabel] = useState("");
+  const saveLabel = async (t: Tx) => { try { await s.call(`/api/money/tx/${t.id}`, json("PATCH", { note: label })); setLabelling(null); await load(); } catch (e) { onError((e as Error).message); } };
   return (
     <>
       {category && <p className="muted small">Showing {category} only. Close the category above to see everything.</p>}
       <ul className="list">
         {data.tx.map((t) => (
           <li key={t.id}>
-            <span className="grow">{t.merchant}<span className="muted small block">{t.day} · {t.description}{t.account ? ` · ${t.account}` : ""}{t.file_id ? <> · <a href={`/api/money/files/${t.file_id}`} target="_blank" rel="noreferrer">receipt</a></> : null}</span></span>
+            <span className="grow">{t.note || t.merchant}
+              <span className="muted small block">{t.day} · {t.description}{t.account ? ` · ${t.account}` : ""}{t.sats !== null ? ` · ${(Math.abs(t.sats) / 1e8).toFixed(8)} BTC` : ""}{t.file_id ? <> · <a href={`/api/money/files/${t.file_id}`} target="_blank" rel="noreferrer">receipt</a></> : null}</span>
+              {t.pair && <span className="small electro block">↔ Moved {t.amount < 0 ? "to" : "from"} {t.pair.account ?? "another account"} · not counted as {t.amount < 0 ? "spending" : "income"}</span>}
+              {labelling === t.id ? (
+                <span className="row" style={{ marginTop: 6 }}><input className="plain-input grow" type="text" aria-label="Label" placeholder="What was this?" value={label} onChange={(e) => setLabel(e.target.value)} /><button className="btn" onClick={() => saveLabel(t)}>Save</button><button className="btn ghost" onClick={() => setLabelling(null)}>Cancel</button></span>
+              ) : <button className="linkish small" onClick={() => { setLabelling(t.id); setLabel(t.note ?? ""); }}>{t.note ? "Change label" : "Add a label"}</button>}
+            </span>
             <select className="inline" aria-label={`Category for ${t.merchant}`} value={t.category} onChange={(e) => resort(t, e.target.value)}>
               {data.categories.map((c) => <option key={c}>{c}</option>)}
             </select>
@@ -327,6 +337,78 @@ function Feed({ s, onDone, onError }: { s: Session; onDone: (message: string) =>
         </form>
       )}
       <p className="muted small">Statements are read on your Umbrel. Receipts are kept with the entry; amounts aren't read from the image yet, so type them.</p>
+    </section>
+  );
+}
+
+/* ---------- Bitcoin wallets ---------- */
+interface Wallet { id: number; label: string; type_name: string; key_end: string; synced_at: string | null; sats: number; transactions: number; pending: number; cad: number | null }
+interface Btc { wallets: Wallet[]; price: number | null; total_sats: number; total_cad: number | null; api: string; price_api: string; api_is_public: boolean; types: Record<string, string> }
+const btcOf = (sats: number) => `${(sats / 1e8).toFixed(8)} BTC`;
+const cad = (n: number | null) => (n === null ? "price unavailable" : `$${n.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+
+function Bitcoin({ s, onChanged, onError }: { s: Session; onChanged: () => void; onError: (m: string) => void }) {
+  const [v, setV] = useState<Btc | null>(null);
+  const [open, setOpen] = useState<null | "add" | "server">(null);
+  const [f, setF] = useState({ label: "", key: "", type: "" });
+  const [srv, setSrv] = useState({ api: "", price_api: "" });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [gone, setGone] = useState<number | null>(null);
+  const load = useCallback(() => s.call<Btc>("/api/money/btc").then((b) => { setV(b); setSrv({ api: b.api, price_api: b.price_api }); }).catch((e) => onError(e.message)), [s, onError]);
+  useEffect(() => { load(); }, [load]);
+  if (!v) return null;
+  const run = async (what: string, fn: () => Promise<unknown>) => { setBusy(what); setNote(null); try { await fn(); await load(); } catch (e) { onError((e as Error).message); } finally { setBusy(null); } };
+  const sync = () => run("sync", async () => { const r = await s.call<{ transactions: number; transfers: number }>("/api/money/btc/sync", { method: "POST" }); setNote(`Up to date. ${r.transactions} new transaction${r.transactions === 1 ? "" : "s"}${r.transfers ? `, ${r.transfers} move${r.transfers === 1 ? "" : "s"} between your own wallets` : ""}.`); onChanged(); });
+  return (
+    <section className="card pad stack">
+      <div className="row"><span className="eyebrow grow">Bitcoin{v.price ? ` · 1 BTC = ${cad(v.price)} CAD` : ""}</span>{v.wallets.length > 0 && <button className="btn" disabled={busy !== null} onClick={sync}>{busy === "sync" ? "Checking the chain…" : "Sync now"}</button>}</div>
+      {v.wallets.length === 0 ? <p className="muted" style={{ margin: 0 }}>Add a wallet's public key (xpub, ypub or zpub) to track its balance and count what you're paid in bitcoin. It's watch-only: nothing here can spend.</p> : (
+        <>
+          <span className="next-title" style={{ fontSize: 32 }}>{cad(v.total_cad)}</span>
+          <span className="muted small">{btcOf(v.total_sats)} across {v.wallets.length} wallet{v.wallets.length === 1 ? "" : "s"} · valued at today's price</span>
+          <ul className="list">
+            {v.wallets.map((w) => (
+              <li key={w.id}>
+                <span className="grow">{w.label}<span className="muted small block">{btcOf(w.sats)} · {w.transactions} transaction{w.transactions === 1 ? "" : "s"}{w.pending ? ` · ${w.pending} unconfirmed` : ""} · {w.type_name} · key ending {w.key_end}{w.synced_at ? "" : " · not synced yet"}</span></span>
+                <span>{cad(w.cad)}</span>
+                {gone === w.id
+                  ? <><button className="btn" onClick={() => run("rm", async () => { await s.call(`/api/money/btc/wallets/${w.id}`, { method: "DELETE" }); setGone(null); onChanged(); })}>Remove it and its transactions</button><button className="btn ghost" onClick={() => setGone(null)}>Keep</button></>
+                  : <button className="btn ghost" aria-label={`Remove ${w.label}`} onClick={() => setGone(w.id)}>✕</button>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {note && <p className="small electro" role="status" style={{ margin: 0 }}>{note}</p>}
+      {!v.api && <p className="accent small" style={{ margin: 0 }}>Set the address server before syncing.</p>}
+      {v.api_is_public && <p className="accent small" style={{ margin: 0 }}>The address server is a public one, so its operator can see which addresses are yours. Your own node's mempool app avoids that.</p>}
+      <div className="row">
+        <button className="btn" onClick={() => setOpen(open === "add" ? null : "add")}>{open === "add" ? "Cancel" : "Add a wallet"}</button>
+        <button className="btn ghost" onClick={() => setOpen(open === "server" ? null : "server")}>Address server</button>
+      </div>
+      {open === "add" && (
+        <form className="form" onSubmit={(e) => { e.preventDefault(); run("add", async () => { await s.call("/api/money/btc/wallets", json("POST", { ...f, type: f.type || undefined })); setF({ label: "", key: "", type: "" }); setOpen(null); setNote("Wallet added. Tap Sync now to load its history."); }); }}>
+          <div className="fields">
+            <label htmlFor="bl">Name this account<input id="bl" type="text" required placeholder="Spending, Taxes, Savings…" value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} /></label>
+            <label htmlFor="bt">Address type<select id="bt" value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })}><option value="">Work it out for me</option>{Object.entries(v.types).map(([k, n]) => <option key={k} value={k}>{n}</option>)}</select></label>
+          </div>
+          <label htmlFor="bk" className="eyebrow">Public key (xpub, ypub, zpub) or descriptor</label>
+          <textarea id="bk" className="plain" required autoCapitalize="off" autoCorrect="off" spellCheck={false} value={f.key} onChange={(e) => setF({ ...f, key: e.target.value })} />
+          <p className="muted small" style={{ margin: 0 }}>Public keys only. Never paste a seed phrase or a private key anywhere. Single-key wallets only for now, not multisig.</p>
+          <div className="row"><button className="btn" type="submit" disabled={busy !== null}>{busy === "add" ? "Adding…" : "Add wallet"}</button></div>
+        </form>
+      )}
+      {open === "server" && (
+        <form className="form" onSubmit={(e) => { e.preventDefault(); run("srv", async () => { await s.call("/api/money/btc/config", json("PUT", { ...srv, test: true })); setNote("Server saved and reachable."); setOpen(null); }); }}>
+          <div className="fields">
+            <label htmlFor="ba">Address server (mempool or Esplora API)<input id="ba" type="text" autoCapitalize="off" placeholder="http://mempool_web_1:3006/api" value={srv.api} onChange={(e) => setSrv({ ...srv, api: e.target.value })} /></label>
+            <label htmlFor="bp">Price source (optional)<input id="bp" type="text" autoCapitalize="off" placeholder="https://mempool.space/api" value={srv.price_api} onChange={(e) => setSrv({ ...srv, price_api: e.target.value })} /></label>
+          </div>
+          <p className="muted small" style={{ margin: 0 }}>Your addresses are only ever sent to the address server, so point it at your own node. The price source is asked for CAD prices and nothing else: no addresses, no amounts.</p>
+          <div className="row"><button className="btn" type="submit" disabled={busy !== null}>{busy === "srv" ? "Checking…" : "Save and test"}</button></div>
+        </form>
+      )}
     </section>
   );
 }

@@ -1,6 +1,6 @@
 {
   "name": "life-architect",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,9 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
+    "@scure/base": "^2.4.0",
+    "@scure/bip32": "^2.4.0",
+    "@scure/btc-signer": "^2.4.1",
     "better-sqlite3": "^11.7.0",
     "hono": "^4.6.14",
     "imapflow": "^2.12.1",
