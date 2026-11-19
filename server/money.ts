@@ -426,6 +426,33 @@ export function mountMoney(app: Hono, ctx: Ctx) {
 
   const accounts = () => (db.prepare("SELECT account, count(*) AS n, min(day) AS first, max(day) AS last FROM money_tx WHERE account IS NOT NULL GROUP BY account ORDER BY account").all() as Array<{ account: string }>);
 
+  /**
+   * Turn charges that were read as money in (or the reverse) the right way round. The import fingerprint is left
+   * alone, so importing the same statement again still adds nothing. A type he chose himself is kept.
+   */
+  function flip(list: Tx[]) {
+    db.transaction(() => {
+      for (const t of list) {
+        const amount = -t.amount, keep = (t as any).keep_cat;
+        const pair = (t as any).pair_id as number | null;
+        if (pair) db.prepare("UPDATE money_tx SET pair_id = NULL WHERE id IN (?, ?)").run(t.id, pair);
+        db.prepare("UPDATE money_tx SET amount = ?, category = ? WHERE id = ?").run(amount, keep ? t.category : categorise(t.description, t.merchant, amount), t.id);
+      }
+    })();
+    linkTransfers();
+  }
+  app.post("/api/money/flip", async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as any;
+    const account = String(b.account ?? "");
+    const month = typeof b.month === "string" && /^\d{4}-\d{2}$/.test(b.month) ? b.month : null;
+    const list = (month
+      ? db.prepare("SELECT * FROM money_tx WHERE account = ? AND wallet_id IS NULL AND substr(day, 1, 7) = ?").all(account, month)
+      : db.prepare("SELECT * FROM money_tx WHERE account = ? AND wallet_id IS NULL").all(account)) as Tx[];
+    if (!list.length) return c.json({ error: "Nothing to flip for that account." }, 400);
+    flip(list);
+    return c.json({ flipped: list.length });
+  });
+
   // Re-sort one transaction; with "always", every one from that merchant, now and in future.
   app.patch("/api/money/tx/:id", async (c) => {
     const id = Number(c.req.param("id"));
@@ -433,6 +460,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     if (!t) return c.json({ error: "That transaction is gone." }, 404);
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     if (typeof b.note === "string") db.prepare("UPDATE money_tx SET note = ? WHERE id = ?").run(b.note.trim().slice(0, 300) || null, id);
+    if (b.flip === true) { if ((t as any).wallet_id) return c.json({ error: "Bitcoin lines come from the chain and can't be flipped." }, 400); flip([t]); return c.json({ ok: true }); }
     if (b.category === undefined && typeof b.note === "string") return c.json({ ok: true });
     if (!cats().includes(b.category as string)) return c.json({ error: "Pick a category." }, 400);
     // His choice sticks: automatic matching won't change it back, and a wrongly matched pair is split.

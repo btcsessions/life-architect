@@ -136,6 +136,16 @@ describe("transfers between my own accounts", () => {
     const s = await (await app.request("/api/money/summary?month=2026-10", { headers: { cookie } })).json();
     expect(s.in).toBe(3050);
     expect(s.out).toBeCloseTo(114.2);
+    // A card statement read the wrong way round: flip the account, and a re-import still adds nothing.
+    await imp("Amex", ["2026-10-06,GROCERY STORE,82.14", "2026-10-07,HARDWARE SHOP,40"]);
+    const flipped = await (await app.request("/api/money/flip", { method: "POST", headers: { ...J, cookie }, body: JSON.stringify({ account: "Amex", month: "2026-10" }) })).json();
+    expect(flipped).toEqual({ flipped: 2 });
+    const amex = ((await (await app.request("/api/money/tx?month=2026-10", { headers: { cookie } })).json()).tx as any[]).filter((t) => t.account === "Amex");
+    expect(amex.map((t) => [t.amount, t.category === "Income"])).toEqual([[-40, false], [-82.14, false]]);
+    expect((await imp("Amex", ["2026-10-06,GROCERY STORE,82.14", "2026-10-07,HARDWARE SHOP,40"])).added).toBe(0);
+    const one = amex[0];
+    await app.request(`/api/money/tx/${one.id}`, { method: "PATCH", headers: { ...J, cookie }, body: JSON.stringify({ flip: true }) });
+
     // "That deposit wasn't a transfer": both sides are released and it stays how I set it.
     await app.request(`/api/money/tx/${by("DEPOSIT").id}`, { method: "PATCH", headers: { ...J, cookie }, body: JSON.stringify({ category: "Income" }) });
     await imp("Savings", ["2026-10-20,ANOTHER LINE,-1"]);

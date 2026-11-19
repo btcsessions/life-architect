@@ -162,18 +162,21 @@ function Dig({ title, total, open, onToggle, children }: { title: string; total:
 }
 
 function Transactions({ s, month, category, onChanged, onError }: { s: Session; month: string; category: string | null; onChanged: () => void; onError: (m: string) => void }) {
-  const [data, setData] = useState<{ tx: Tx[]; categories: string[]; custom: string[] } | null>(null);
+  const [data, setData] = useState<{ tx: Tx[]; categories: string[]; custom: string[]; accounts: Array<{ account: string; n: number }> } | null>(null);
+  const [labelling, setLabelling] = useState<number | null>(null);
+  const [label, setLabel] = useState("");
   const [type, setType] = useState("");
+  const [flipAcct, setFlipAcct] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
   const [types, setTypes] = useState(false);
-  const load = useCallback(() => s.call<{ tx: Tx[]; categories: string[]; custom: string[] }>(`/api/money/tx?month=${month}${category ? `&category=${encodeURIComponent(category)}` : ""}`).then(setData).catch((e) => onError(e.message)), [s, month, category, onError]);
+  const load = useCallback(() => s.call<{ tx: Tx[]; categories: string[]; custom: string[]; accounts: Array<{ account: string; n: number }> }>(`/api/money/tx?month=${month}${category ? `&category=${encodeURIComponent(category)}` : ""}`).then(setData).catch((e) => onError(e.message)), [s, month, category, onError]);
   useEffect(() => { load(); }, [load]);
   if (!data) return <p className="muted">Loading…</p>;
   const resort = async (t: Tx, cat: string) => {
     const always = t.sats === null && window.confirm(`Put everything from "${t.merchant}" in ${cat} from now on?\n\nOK: always. Cancel: just this one.`);
     try { await s.call(`/api/money/tx/${t.id}`, json("PATCH", { category: cat, always })); await load(); onChanged(); } catch (e) { onError((e as Error).message); }
   };
-  const [labelling, setLabelling] = useState<number | null>(null);
-  const [label, setLabel] = useState("");
+  const flipAll = async (m: string | null) => { try { const r = await s.call<{ flipped: number }>("/api/money/flip", json("POST", { account: flipAcct, month: m })); setFlipAcct(""); await load(); onChanged(); setMsg(`Flipped ${r.flipped} line${r.flipped === 1 ? "" : "s"}. Charges and money in are now the other way round for that account.`); } catch (e) { onError((e as Error).message); } };
   const saveLabel = async (t: Tx) => { try { await s.call(`/api/money/tx/${t.id}`, json("PATCH", { note: label })); setLabelling(null); await load(); } catch (e) { onError((e as Error).message); } };
   return (
     <>
@@ -189,6 +192,13 @@ function Transactions({ s, month, category, onChanged, onError }: { s: Session; 
           <p className="muted small" style={{ margin: 0 }}>New types show in the list beside every transaction and get their own slice of the chart. Removing one sends its transactions back to Other.</p>
         </div>
       )}
+      {data.accounts.length > 0 && (
+        <div className="row">
+          <select className="inline" aria-label="Account to flip" value={flipAcct} onChange={(e) => setFlipAcct(e.target.value)}><option value="">An account's charges show as income?</option>{data.accounts.map((a) => <option key={a.account} value={a.account}>{a.account} · {a.n} lines</option>)}</select>
+          {flipAcct && <><button className="btn" onClick={() => flipAll(month)}>Flip {flipAcct} for this month</button><button className="btn ghost" onClick={() => flipAll(null)}>Flip all of {flipAcct}</button></>}
+        </div>
+      )}
+      {msg && <p className="small electro" role="status">{msg}</p>}
       {category && <p className="muted small">Showing {category} only. Close the category above to see everything.</p>}
       <ul className="list">
         {data.tx.map((t) => (
@@ -198,7 +208,12 @@ function Transactions({ s, month, category, onChanged, onError }: { s: Session; 
               {t.pair && <span className="small electro block">↔ Moved {t.amount < 0 ? "to" : "from"} {t.pair.account ?? "another account"} · not counted as {t.amount < 0 ? "spending" : "income"}</span>}
               {labelling === t.id ? (
                 <span className="row" style={{ marginTop: 6 }}><input className="plain-input grow" type="text" aria-label="Label" placeholder="What was this?" value={label} onChange={(e) => setLabel(e.target.value)} /><button className="btn" onClick={() => saveLabel(t)}>Save</button><button className="btn ghost" onClick={() => setLabelling(null)}>Cancel</button></span>
-              ) : <button className="linkish small" onClick={() => { setLabelling(t.id); setLabel(t.note ?? ""); }}>{t.note ? "Change label" : "Add a label"}</button>}
+              ) : (
+                <span className="row" style={{ gap: 14 }}>
+                  <button className="linkish small" onClick={() => { setLabelling(t.id); setLabel(t.note ?? ""); }}>{t.note ? "Change label" : "Add a label"}</button>
+                  {t.sats === null && <button className="linkish small" onClick={() => s.call(`/api/money/tx/${t.id}`, json("PATCH", { flip: true })).then(() => { load(); onChanged(); }).catch((e) => onError(e.message))}>{t.amount > 0 ? "This was a charge, not money in" : "This was money in, not a charge"}</button>}
+                </span>
+              )}
             </span>
             <select className="inline" aria-label={`Category for ${t.merchant}`} value={t.category} onChange={(e) => resort(t, e.target.value)}>
               {data.categories.map((c) => <option key={c}>{c}</option>)}
