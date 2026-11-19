@@ -125,6 +125,13 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
   const conf = (k: string) => (db.prepare("SELECT value FROM btc_config WHERE key = ?").get(k) as { value: string } | undefined)?.value ?? "";
   const setConf = (k: string, v: string) => db.prepare("INSERT INTO btc_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v);
   const base = (k: string) => conf(k).replace(/\/+$/, "");
+  // Bitcoin he sends that doesn't land in another of his wallets is, by default, paying off a card: money moving to
+  // clear debt, not new spending (the spending was the card purchases). He can switch this off, or re-type any one line.
+  const sendsArePayments = () => conf("sends_as") !== "spending";
+  function applySendRule() {
+    const to = sendsArePayments() ? "Transfers" : "Other", from = sendsArePayments() ? "Other" : "Transfers";
+    db.prepare("UPDATE money_tx SET category = ? WHERE wallet_id IS NOT NULL AND amount < 0 AND pair_id IS NULL AND keep_cat = 0 AND paid_account IS NULL AND category = ? AND description = 'Bitcoin sent'").run(to, from);
+  }
   const priceBase = () => base("price_api") || "https://mempool.space/api";
   // Public servers limit how fast they can be asked, so wait and retry when told to slow down.
   const get = async (url: string) => {
@@ -242,7 +249,7 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
         } else {
           const hash = createHash("sha256").update(`btc|${r.wallet_id}|${r.txid}`).digest("hex");
           db.prepare("INSERT OR IGNORE INTO money_tx (day, description, merchant, amount, account, category, hash, created_at, sats, txid, wallet_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .run(day, description, "Bitcoin", amount || (r.net > 0 ? 0.01 : -0.01), r.label, other ? "Transfers" : r.net > 0 ? "Income" : "Other", hash, ctx.now().toISOString(), r.net, r.txid, r.wallet_id);
+            .run(day, description, "Bitcoin", amount || (r.net > 0 ? 0.01 : -0.01), r.label, other || (r.net < 0 && sendsArePayments()) ? "Transfers" : r.net > 0 ? "Income" : "Other", hash, ctx.now().toISOString(), r.net, r.txid, r.wallet_id);
           transactions++;
         }
         if (other) transfers++;
@@ -254,6 +261,7 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
         if (a && b) { db.prepare("UPDATE money_tx SET pair_id = ? WHERE id = ?").run(b.id, a.id); db.prepare("UPDATE money_tx SET pair_id = ? WHERE id = ?").run(a.id, b.id); }
       }
     })();
+    applySendRule();
     linkTransfers();
     return { transactions, transfers: Math.floor(transfers / 2) };
   }
@@ -266,10 +274,11 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
     });
     return {
       wallets, price: now, total_sats: wallets.reduce((a, w) => a + w.sats, 0), total_cad: now ? Math.round(wallets.reduce((a, w) => a + (w.cad ?? 0), 0) * 100) / 100 : null,
-      api: conf("api"), price_api: conf("price_api"), api_is_public: publicHost(conf("api")), types: TYPE_NAMES,
+      sends_are_payments: sendsArePayments(), api: conf("api"), price_api: conf("price_api"), api_is_public: publicHost(conf("api")), types: TYPE_NAMES,
     };
   }
 
+  try { applySendRule(); } catch { /* columns arrive with the first Money start */ }
   app.get("/api/money/btc", async (c) => c.json(await view()));
 
   app.put("/api/money/btc/config", async (c) => {
@@ -280,6 +289,7 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
       if (v && !/^https?:\/\/\S+$/.test(v)) return c.json({ error: "Addresses start with http:// or https://" }, 400);
       setConf(k, v);
     }
+    if (typeof b.sends_are_payments === "boolean") { setConf("sends_as", b.sends_are_payments ? "payments" : "spending"); applySendRule(); linkTransfers(); }
     if (b.test) {
       try { await get(`${base("api")}/blocks/tip/height`); } catch (e) { return c.json({ error: `Couldn't reach that server: ${(e as Error).message}.` }, 502); }
     }

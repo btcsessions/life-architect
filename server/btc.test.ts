@@ -117,7 +117,15 @@ describe("bitcoin wallets in Money", () => {
       ["Taxes", "Bitcoin moved from Spending", 440, "Transfers"],
     ]);
     expect(april[0].pair.account).toBeTruthy();
-    expect((await month("2026-05"))[0]).toMatchObject({ description: "Bitcoin sent", amount: -120.6, category: "Other" });
+    // By default a send that isn't to one of my wallets is paying down debt, not spending.
+    expect((await month("2026-05"))[0]).toMatchObject({ description: "Bitcoin sent", amount: -120.6, category: "Transfers", pair: null });
+    expect((await (await call("GET", "/api/money/summary?month=2026-05")).json()).out).toBe(0);
+    // Switched off, it counts as spending again; switched back on, it doesn't.
+    await call("PUT", "/api/money/btc/config", { sends_are_payments: false });
+    expect((await month("2026-05"))[0].category).toBe("Other");
+    expect((await (await call("GET", "/api/money/summary?month=2026-05")).json()).out).toBeCloseTo(120.6);
+    await call("PUT", "/api/money/btc/config", { sends_are_payments: true });
+    expect((await month("2026-05"))[0].category).toBe("Transfers");
     // A card statement arrives with a payment for nearly the same dollars two days later: matched without being asked.
     const amex = new FormData(); amex.set("file", new File(["Date,Description,Amount\n2026-05-22,PAYMENT RECEIVED - THANK YOU,121.00"], "a.csv")); amex.set("account", "Amex");
     expect((await (await app.request("/api/money/import", { method: "POST", headers: { cookie }, body: amex })).json()).transfers).toBe(1);

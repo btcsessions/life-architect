@@ -205,6 +205,7 @@ function Transactions({ s, month, category, onChanged, onError }: { s: Session; 
           <li key={t.id}>
             <span className="grow">{t.note || t.merchant}
               <span className="muted small block">{t.day} · {t.description}{t.account ? ` · ${t.account}` : ""}{t.sats !== null ? ` · ${(Math.abs(t.sats) / 1e8).toFixed(8)} BTC` : ""}{t.file_id ? <> · <a href={`/api/money/files/${t.file_id}`} target="_blank" rel="noreferrer">receipt</a></> : null}</span>
+              {!t.pair && t.sats !== null && t.amount < 0 && t.category === "Transfers" && <span className="small electro block">Counted as paying down debt · not spending. Change the type if this one was a purchase.</span>}
               {t.pair && <span className="small electro block">↔ Moved {t.amount < 0 ? "to" : "from"} {t.pair.account ?? "another account"} · not counted as {t.amount < 0 ? "spending" : "income"}</span>}
               {labelling === t.id ? (
                 <span className="row" style={{ marginTop: 6 }}><input className="plain-input grow" type="text" aria-label="Label" placeholder="What was this?" value={label} onChange={(e) => setLabel(e.target.value)} /><button className="btn" onClick={() => saveLabel(t)}>Save</button><button className="btn ghost" onClick={() => setLabelling(null)}>Cancel</button></span>
@@ -381,7 +382,7 @@ function Feed({ s, onDone, onError }: { s: Session; onDone: (message: string) =>
 
 /* ---------- Bitcoin wallets ---------- */
 interface Wallet { id: number; label: string; type_name: string; key_end: string; synced_at: string | null; sats: number; transactions: number; pending: number; cad: number | null }
-interface Btc { wallets: Wallet[]; price: number | null; total_sats: number; total_cad: number | null; api: string; price_api: string; api_is_public: boolean; types: Record<string, string> }
+interface Btc { sends_are_payments: boolean; wallets: Wallet[]; price: number | null; total_sats: number; total_cad: number | null; api: string; price_api: string; api_is_public: boolean; types: Record<string, string> }
 const btcOf = (sats: number) => `${(sats / 1e8).toFixed(8)} BTC`;
 const cad = (n: number | null) => (n === null ? "price unavailable" : `$${n.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
 
@@ -417,6 +418,9 @@ function Bitcoin({ s, onChanged, onError }: { s: Session; onChanged: () => void;
             ))}
           </ul>
         </>
+      )}
+      {v.wallets.length > 0 && (
+        <label className="check" htmlFor="sap"><input id="sap" type="checkbox" checked={v.sends_are_payments} onChange={(e) => run("rule", async () => { await s.call("/api/money/btc/config", json("PUT", { sends_are_payments: e.target.checked })); onChanged(); })} /><span>Bitcoin I send is paying off cards or bills, not new spending. (Moves between my own wallets are never counted either way.)</span></label>
       )}
       {note && <p className="small electro" role="status" style={{ margin: 0, overflowWrap: "anywhere" }}>{note}</p>}
       {!v.api && <p className="accent small" style={{ margin: 0 }}>Set the address server before syncing.</p>}

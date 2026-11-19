@@ -189,7 +189,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
       // Bitcoin that paid off a card or a bill: the dollar amounts differ a little (conversion and fees), so the
       // match is looser. Either he said which account it paid, or the other side reads like a card payment.
       const pair = (a: number, b: number) => { db.prepare("UPDATE money_tx SET category = 'Transfers', pair_id = ? WHERE id = ?").run(b, a); db.prepare("UPDATE money_tx SET category = 'Transfers', pair_id = ? WHERE id = ?").run(a, b); };
-      const sends = db.prepare("SELECT * FROM money_tx WHERE wallet_id IS NOT NULL AND amount < 0 AND pair_id IS NULL AND (paid_account IS NOT NULL OR (keep_cat = 0 AND category != 'Transfers')) ORDER BY day, id").all() as Array<Tx & { paid_account: string | null }>;
+      const sends = db.prepare("SELECT * FROM money_tx WHERE wallet_id IS NOT NULL AND amount < 0 AND pair_id IS NULL AND (paid_account IS NOT NULL OR keep_cat = 0) ORDER BY day, id").all() as Array<Tx & { paid_account: string | null }>;
       for (const out of sends) {
         const told = out.paid_account, loose = told ? 0.1 : 0.03, days = told ? 7 : 5;
         const match = (db.prepare("SELECT * FROM money_tx WHERE wallet_id IS NULL AND amount > 0 AND pair_id IS NULL AND account IS NOT NULL").all() as Tx[])
