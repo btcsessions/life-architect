@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // People: the relationships you're building and the outcomes you're working toward.
 // Kept in its own database file, behind its own PIN, and only ever sent to People's own model.
 import type { Hono } from "hono";
@@ -95,6 +96,11 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     CREATE TABLE IF NOT EXISTS library (id INTEGER PRIMARY KEY AUTOINCREMENT, doc TEXT NOT NULL, heading TEXT NOT NULL, body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS chat (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL);
   `);
+  // The record itself can't be rewritten, but a note can move to another person when two entries turn out to be one.
+  db.exec(`DROP TRIGGER IF EXISTS interaction_immutable;
+    CREATE TRIGGER interaction_immutable BEFORE UPDATE OF text, ts, quotes, kind, source ON interaction BEGIN SELECT RAISE(ABORT, 'A filed record cannot be rewritten'); END;
+    CREATE TABLE IF NOT EXISTS import_seen (hash TEXT PRIMARY KEY);`);
+  if (!(db.prepare("PRAGMA table_info(person)").all() as Array<{ name: string }>).some((c) => c.name === "imported")) db.exec("ALTER TABLE person ADD COLUMN imported INTEGER NOT NULL DEFAULT 0");
   mountLock(app, ctx, "people");
 
   const now = () => ctx.now().toISOString();
@@ -117,9 +123,9 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     }
   }
 
-  function addInteraction(pid: number, text: string, o: { kind?: string; outcome?: string | null; goal_id?: number | null; source?: string; file_id?: number | null; corrects_id?: number | null } = {}) {
+  function addInteraction(pid: number, text: string, o: { kind?: string; outcome?: string | null; goal_id?: number | null; source?: string; file_id?: number | null; corrects_id?: number | null; ts?: string } = {}) {
     const r = db.prepare("INSERT INTO interaction (ts, person_id, goal_id, kind, text, outcome, quotes, source, file_id, corrects_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(now(), pid, o.goal_id ?? null, o.kind ?? "note", text.trim(), OUTCOMES.includes(o.outcome ?? "") ? o.outcome : null, JSON.stringify(quotesIn(text)), o.source ?? "app", o.file_id ?? null, o.corrects_id ?? null);
+      .run(o.ts ?? now(), pid, o.goal_id ?? null, o.kind ?? "note", text.trim(), OUTCOMES.includes(o.outcome ?? "") ? o.outcome : null, JSON.stringify(quotesIn(text)), o.source ?? "app", o.file_id ?? null, o.corrects_id ?? null);
     return Number(r.lastInsertRowid);
   }
 
@@ -129,6 +135,40 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     const people = g.kind === "relationship" ? [person(g.person_id)] : (db.prepare("SELECT p.* FROM person p JOIN goal_people gp ON gp.person_id = p.id WHERE gp.goal_id = ?").all(g.id) as any[]);
     return { ...g, steps, current_step: current?.id ?? null, step_number: current ? steps.indexOf(current) + 1 : steps.length, people: people.filter(Boolean).map((p) => ({ id: p.id, name: p.name })), days_quiet: g.kind === "relationship" ? daysSince(lastSeen(g.person_id)) : null };
   };
+
+  /**
+   * Takes a hand-over. A plain string goes to the unsorted pile. An object naming a person is filed straight onto
+   * that person (created if new): {"person","text","date"?,"type"?: "note"|"fact"|"question"|"goal"|"met","label"?,"outcome"?}.
+   * Sending the same thing twice files it once.
+   */
+  function handOver(items: unknown[], source: string) {
+    const out = { received: 0, filed: 0, unsorted: 0, people_created: 0, duplicates: 0 };
+    const src = source.slice(0, 40);
+    db.transaction(() => {
+      for (const it of items) {
+        const o = typeof it === "string" ? { text: it } : it && typeof it === "object" ? (it as any) : null;
+        const text = typeof o?.text === "string" ? o.text.trim().slice(0, 20_000) : "";
+        const type = ["note", "fact", "question", "goal", "met"].includes(o?.type) ? o.type : "note";
+        if (!text) continue;
+        out.received++;
+        const name = typeof o.person === "string" ? o.person.trim().slice(0, 80) : "";
+        const hash = createHash("sha256").update([name.toLowerCase(), type, o.label ?? "", text].join("|")).digest("hex");
+        if (!db.prepare("INSERT OR IGNORE INTO import_seen (hash) VALUES (?)").run(hash).changes) { out.duplicates++; continue; }
+        if (!name) { db.prepare("INSERT INTO inbox (ts, source, text) VALUES (?, ?, ?)").run(now(), src, text); out.unsorted++; continue; }
+        let p = byName(name);
+        if (!p) { p = person(Number(db.prepare("INSERT INTO person (name, created_at, imported) VALUES (?, ?, 1)").run(name, now()).lastInsertRowid)); out.people_created++; }
+        const d = typeof o.date === "string" && !Number.isNaN(Date.parse(o.date)) ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(o.date) ? `${o.date}T12:00:00` : o.date).toISOString() : undefined;
+        if (type === "fact") db.prepare("INSERT INTO fact (person_id, label, value, grade, created_at) VALUES (?, ?, ?, 'O:sys', ?)").run(p.id, String(o.label ?? "Note").slice(0, 40), text.slice(0, 500), now());
+        else if (type === "question") db.prepare("INSERT INTO thread (person_id, question, opened_at) VALUES (?, ?, ?)").run(p.id, text.slice(0, 500), d ?? now());
+        else if (type === "met") db.prepare("UPDATE person SET how_met = coalesce(how_met, ?) WHERE id = ?").run(text.slice(0, 300), p.id);
+        else if (type === "goal") {
+          if (!db.prepare("SELECT 1 FROM goal WHERE person_id = ? AND kind = 'relationship' AND status = 'open'").get(p.id)) db.prepare("INSERT INTO goal (kind, person_id, title, created_at) VALUES ('relationship', ?, ?, ?)").run(p.id, text.slice(0, 300), now());
+        } else addInteraction(p.id, text, { source: src, kind: "handover", outcome: o.outcome ?? null, ts: d });
+        out.filed++;
+      }
+    })();
+    return out;
+  }
 
   // ---- Home
   app.get("/api/people/home", (c) => {
@@ -141,6 +181,10 @@ export function mountPeople(app: Hono, ctx: Ctx) {
       scenarios: goals.filter((g) => g.kind === "scenario"),
       people: db.prepare("SELECT id, name FROM person ORDER BY name").all(),
       inbox: (db.prepare("SELECT count(*) AS n FROM inbox WHERE status = 'new'").get() as any).n,
+      // People who exist (usually from a hand-over) but aren't in a relationship goal or a scenario yet.
+      unplaced: db.prepare(`SELECT p.id, p.name, p.imported, (SELECT count(*) FROM interaction i WHERE i.person_id = p.id) AS notes, (SELECT count(*) FROM fact f WHERE f.person_id = p.id) AS facts
+        FROM person p WHERE NOT EXISTS (SELECT 1 FROM goal g WHERE g.person_id = p.id AND g.status = 'open')
+        AND NOT EXISTS (SELECT 1 FROM goal_people gp JOIN goal g ON g.id = gp.goal_id WHERE gp.person_id = p.id AND g.status = 'open') ORDER BY notes DESC, p.name`).all(),
       stale, has_model: Boolean(ctx.modelFor("people_llm")), outcomes: OUTCOMES,
     });
   });
@@ -157,13 +201,58 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     return c.json(person(id));
   });
 
+  app.patch("/api/people/persons/:id", async (c) => {
+    const p = person(Number(c.req.param("id")));
+    if (!p) return bad(c, "No such person.", 404);
+    const b = (await c.req.json().catch(() => ({}))) as any;
+    if (typeof b.name === "string" && b.name.trim()) {
+      const other = byName(b.name);
+      if (other && other.id !== p.id) return bad(c, "There's already someone with that name. Merge them instead.", 409);
+      db.prepare("UPDATE person SET name = ? WHERE id = ?").run(b.name.trim().slice(0, 80), p.id);
+    }
+    if ("how_met" in b) db.prepare("UPDATE person SET how_met = ? WHERE id = ?").run(typeof b.how_met === "string" && b.how_met.trim() ? b.how_met.trim().slice(0, 300) : null, p.id);
+    return c.json(person(p.id));
+  });
+
+  // Two entries that are the same person: everything from this one moves onto the other.
+  app.post("/api/people/persons/:id/merge", async (c) => {
+    const from = person(Number(c.req.param("id")));
+    const into = person(Number(((await c.req.json().catch(() => ({}))) as any).into));
+    if (!from || !into || from.id === into.id) return bad(c, "Pick the person to merge into.");
+    db.transaction(() => {
+      for (const t of ["interaction", "thread", "fact", "reading"]) db.prepare(`UPDATE ${t} SET person_id = ? WHERE person_id = ?`).run(into.id, from.id);
+      db.prepare("INSERT OR IGNORE INTO goal_people (goal_id, person_id) SELECT goal_id, ? FROM goal_people WHERE person_id = ?").run(into.id, from.id);
+      db.prepare("DELETE FROM goal_people WHERE person_id = ?").run(from.id);
+      const has = db.prepare("SELECT 1 FROM goal WHERE person_id = ? AND kind = 'relationship' AND status = 'open'").get(into.id);
+      for (const g of db.prepare("SELECT * FROM goal WHERE person_id = ?").all(from.id) as any[]) {
+        if (has && g.kind === "relationship" && g.status === "open") { db.prepare("UPDATE goal SET person_id = ?, status = 'dropped' WHERE id = ?").run(into.id, g.id); syncTask({ ...g, status: "dropped" }); }
+        else db.prepare("UPDATE goal SET person_id = ? WHERE id = ?").run(into.id, g.id);
+      }
+      if (!into.how_met && from.how_met) db.prepare("UPDATE person SET how_met = ? WHERE id = ?").run(from.how_met, into.id);
+      db.prepare("DELETE FROM person WHERE id = ?").run(from.id);
+    })();
+    return c.json(person(into.id));
+  });
+
+  // Remove someone and everything recorded about them. For hand-over mistakes; it can't be undone.
+  app.delete("/api/people/persons/:id", (c) => {
+    const p = person(Number(c.req.param("id")));
+    if (!p) return bad(c, "No such person.", 404);
+    db.transaction(() => {
+      for (const g of db.prepare("SELECT * FROM goal WHERE person_id = ?").all(p.id) as any[]) { syncTask({ ...g, status: "dropped" }); db.prepare("DELETE FROM step WHERE goal_id = ?").run(g.id); }
+      for (const t of ["interaction", "thread", "fact", "reading", "goal", "goal_people"]) db.prepare(`DELETE FROM ${t} WHERE person_id = ?`).run(p.id);
+      db.prepare("DELETE FROM person WHERE id = ?").run(p.id);
+    })();
+    return c.json({ removed: true });
+  });
+
   app.get("/api/people/persons/:id", (c) => {
     const p = person(Number(c.req.param("id")));
     if (!p) return bad(c, "No such person.", 404);
-    const log = (db.prepare("SELECT * FROM interaction WHERE person_id = ? ORDER BY id DESC").all(p.id) as any[]).map((i) => ({ ...i, quotes: JSON.parse(i.quotes) }));
+    const log = (db.prepare("SELECT * FROM interaction WHERE person_id = ? ORDER BY ts DESC, id DESC").all(p.id) as any[]).map((i) => ({ ...i, quotes: JSON.parse(i.quotes) }));
     const g = db.prepare("SELECT * FROM goal WHERE kind = 'relationship' AND person_id = ? AND status = 'open'").get(p.id) as any;
     const reading = db.prepare("SELECT * FROM reading WHERE person_id = ? ORDER BY id DESC LIMIT 1").get(p.id) as any;
-    return c.json({
+    return c.json({ others: db.prepare("SELECT id, name FROM person WHERE id != ? ORDER BY name").all(p.id), 
       person: p, days_quiet: daysSince(lastSeen(p.id)), goal: g ? goalView(g) : null,
       scenarios: (db.prepare("SELECT g.* FROM goal g JOIN goal_people gp ON gp.goal_id = g.id WHERE gp.person_id = ? AND g.status = 'open'").all(p.id) as any[]).map((s) => ({ id: s.id, title: s.title })),
       threads: db.prepare("SELECT * FROM thread WHERE person_id = ? AND closed_at IS NULL ORDER BY id").all(p.id),
@@ -193,7 +282,7 @@ export function mountPeople(app: Hono, ctx: Ctx) {
   app.get("/api/people/goals/:id", (c) => {
     const g = goal(Number(c.req.param("id")));
     if (!g) return bad(c, "No such goal.", 404);
-    const log = (db.prepare("SELECT i.*, p.name AS person_name FROM interaction i JOIN person p ON p.id = i.person_id WHERE i.goal_id = ? ORDER BY i.id DESC").all(g.id) as any[]).map((i) => ({ ...i, quotes: JSON.parse(i.quotes) }));
+    const log = (db.prepare("SELECT i.*, p.name AS person_name FROM interaction i JOIN person p ON p.id = i.person_id WHERE i.goal_id = ? ORDER BY i.ts DESC, i.id DESC").all(g.id) as any[]).map((i) => ({ ...i, quotes: JSON.parse(i.quotes) }));
     const chunks = db.prepare("SELECT id, doc, heading, body FROM library").all() as any[];
     return c.json({ goal: goalView(g), log, library: retrieve(chunks, `${g.title} ${g.done_looks_like ?? ""}`).map((x) => ({ id: x.id, doc: x.doc, heading: x.heading })), people: db.prepare("SELECT id, name FROM person ORDER BY name").all() });
   });
@@ -290,10 +379,10 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     const given = c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
     if (!token || given.length !== token.length || !timingSafeEqual(Buffer.from(given), Buffer.from(token))) return bad(c, "Wrong or missing relay token.", 401);
     const b = (await c.req.json().catch(() => ({}))) as any;
-    const items = (Array.isArray(b.items) ? b.items : [b.text]).filter((t: unknown) => typeof t === "string" && t.trim());
-    if (!items.length) return bad(c, "Send the notes as \"text\" or as a list in \"items\".");
-    for (const t of items.slice(0, 500)) db.prepare("INSERT INTO inbox (ts, source, text) VALUES (?, ?, ?)").run(now(), String(b.source ?? "hermes").slice(0, 40), String(t).trim().slice(0, 20000));
-    return c.json({ received: Math.min(items.length, 500) }); // nothing about People is ever sent back
+    const items = Array.isArray(b.items) ? b.items : [b.text ?? b];
+    const r = handOver(items.slice(0, 2000), String(b.source ?? "hermes"));
+    if (!r.received) return bad(c, "Send the notes as \"text\" or as a list in \"items\".");
+    return c.json(r); // counts only: nothing about People is ever sent back
   });
   app.get("/api/people/inbox", (c) => c.json({ items: db.prepare("SELECT * FROM inbox WHERE status = 'new' ORDER BY id").all(), people: db.prepare("SELECT id, name FROM person ORDER BY name").all() }));
   app.post("/api/people/inbox/:id/skip", (c) => (db.prepare("UPDATE inbox SET status = 'skipped' WHERE id = ?").run(Number(c.req.param("id"))).changes ? c.json({ ok: true }) : bad(c, "Already dealt with.", 404)));
@@ -370,7 +459,7 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     const p = person(Number(b.person_id ?? g?.person_id));
     if (!p && !g) return bad(c, "Pick a person or a scenario.");
     const where = g && g.kind === "scenario" ? ["goal_id = ?", g.id] : ["person_id = ?", p.id];
-    const recent = (db.prepare(`SELECT * FROM interaction WHERE ${where[0]} ORDER BY id DESC LIMIT 2`).all(where[1]) as any[]).reverse();
+    const recent = (db.prepare(`SELECT * FROM interaction WHERE ${where[0]} ORDER BY ts DESC, id DESC LIMIT 2`).all(where[1]) as any[]).reverse();
     if (!recent.length) return bad(c, "There's nothing recorded to read yet. Add a note first.");
     const threads = p ? (db.prepare("SELECT question FROM thread WHERE person_id = ? AND closed_at IS NULL").all(p.id) as any[]).map((t) => t.question) : [];
     const view = g ? goalView(g) : null;
@@ -430,5 +519,5 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     }
     return c.json(readingView(db.prepare("SELECT * FROM reading WHERE id = ?").get(r.id)));
   });
-  return { drop: (text: string, source: string) => { db.prepare("INSERT INTO inbox (ts, source, text) VALUES (?, ?, ?)").run(now(), source.slice(0, 40), text.slice(0, 20000)); } };
+  return { drop: (text: string, source: string) => { handOver([text], source); } };
 }

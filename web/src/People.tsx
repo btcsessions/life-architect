@@ -127,6 +127,21 @@ function Home({ s, go, onError, onBack }: In & { onBack: () => void }) {
         </form>
       )}
 
+      {h.unplaced.length > 0 && (
+        <section className="stack">
+          <span className="eyebrow electro">Handed over · not set up yet · {h.unplaced.length}</span>
+          <p className="muted small" style={{ margin: 0 }}>People with notes but no goal. Open one to say what you want it to be, merge it into someone else, or remove it.</p>
+          <div className="grid-2">
+            {h.unplaced.map((p: any) => (
+              <button key={p.id} className="card pad trip-card" onClick={() => go({ at: "person", id: p.id })}>
+                <span className="module-name">{p.name}</span>
+                <span className="muted small">{p.notes} note{p.notes === 1 ? "" : "s"}{p.facts ? ` · ${p.facts} detail${p.facts === 1 ? "" : "s"}` : ""}{p.imported ? " · from Hermes" : ""}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       {(h.inbox > 0 || h.stale.length > 0 || noMove.length > 0) && (
         <section className="card pad">
           <span className="eyebrow accent">It needs you</span>
@@ -228,8 +243,13 @@ function PersonScreen({ s, go, onError, stt, id }: In & { id: number }) {
   const [fact, setFact] = useState({ label: "", value: "", sensitive: false });
   const [thread, setThread] = useState("");
   const [toward, setToward] = useState("");
+  const [manage, setManage] = useState(false);
+  const [name, setName] = useState("");
+  const [into, setInto] = useState("");
+  const [sure, setSure] = useState(false);
   if (!v) return <p className="muted">Loading…</p>;
   const act = async (fn: () => Promise<unknown>) => { try { await fn(); await load(); } catch (e) { onError((e as Error).message); } };
+  const leave = async (fn: () => Promise<unknown>, to: Screen) => { try { await fn(); go(to); } catch (e) { onError((e as Error).message); } };
   const here: Screen = { at: "person", id };
   return (
     <div className="stack">
@@ -292,6 +312,30 @@ function PersonScreen({ s, go, onError, stt, id }: In & { id: number }) {
       <NoteForm s={s} stt={stt} personId={id} outcomes={v.outcomes} onSaved={load} onError={onError} />
 
       <section className="card pad stack"><span className="eyebrow">The record</span><Log log={v.log} /></section>
+
+      <section className="stack">
+        <button className="linkish" aria-expanded={manage} onClick={() => { setManage(!manage); setName(v.person.name); setSure(false); }}>Rename, merge or remove {manage ? "▾" : "▸"}</button>
+        {manage && (
+          <div className="card pad form">
+            <form className="row" onSubmit={(e) => { e.preventDefault(); act(() => s.call(`/api/people/persons/${id}`, json("PATCH", { name }))); }}>
+              <label htmlFor="rn" className="sr">Name</label>
+              <input id="rn" className="grow plain-input" type="text" value={name} onChange={(e) => setName(e.target.value)} />
+              <button className="btn" type="submit" disabled={!name.trim() || name === v.person.name}>Rename</button>
+            </form>
+            {v.others.length > 0 && (
+              <div className="row">
+                <select className="inline grow" aria-label="Merge into" value={into} onChange={(e) => setInto(e.target.value)}><option value="">Same person as…</option>{v.others.map((p: Ref) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+                <button className="btn" disabled={!into} onClick={() => leave(() => s.call(`/api/people/persons/${id}/merge`, json("POST", { into: Number(into) })), { at: "person", id: Number(into) })}>Merge into them</button>
+              </div>
+            )}
+            <div className="row">
+              {!sure ? <button className="btn ghost" onClick={() => setSure(true)}>Remove {v.person.name}…</button> : (
+                <><span className="accent small grow">This deletes every note, detail and reading about {v.person.name}. It can't be undone.</span><button className="btn" onClick={() => leave(() => s.call(`/api/people/persons/${id}`, { method: "DELETE" }), { at: "home" })}>Yes, remove</button><button className="btn ghost" onClick={() => setSure(false)}>Keep</button></>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
 
       <div className="row">
         <button className="btn" onClick={() => s.call<{ id: number }>("/api/people/readings", json("POST", { person_id: id })).then((r) => go({ at: "reading", id: r.id, from: here })).catch((e) => onError(e.message))}>Guide me on this</button>
@@ -491,20 +535,25 @@ function LibraryScreen({ s, go, onError }: In) {
 function InboxScreen({ s, go, onError }: In) {
   const [data, load] = useLoad<{ items: Array<{ id: number; ts: string; source: string; text: string }>; people: Ref[] }>(s, "/api/people/inbox", onError);
   const [who, setWho] = useState<Record<number, string>>({});
+  const [fresh, setFresh] = useState<Record<number, string>>({});
   if (!data) return <p className="muted">Loading…</p>;
   const act = async (fn: () => Promise<unknown>) => { try { await fn(); await load(); } catch (e) { onError((e as Error).message); } };
   return (
     <div className="stack">
       <Sub title="Handed over" go={go} />
       {data.items.length === 0 && <p className="muted">Nothing waiting.</p>}
-      {data.people.length === 0 && data.items.length > 0 && <p className="accent small">Add the people these are about first, then come back to file them.</p>}
+      
       {data.items.map((i) => (
         <section key={i.id} className="card pad stack">
           <span className="eyebrow electro">{i.source} · {when(i.ts)}</span>
           <p className="handed">{i.text}</p>
           <div className="row">
-            <select className="inline" aria-label="Who is this about" value={who[i.id] ?? ""} onChange={(e) => setWho({ ...who, [i.id]: e.target.value })}><option value="">Who is this about?</option>{data.people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-            <button className="btn" disabled={!who[i.id]} onClick={() => act(() => s.call("/api/people/interactions", json("POST", { person_id: Number(who[i.id]), text: i.text, inbox_id: i.id })))}>File it</button>
+            <select className="inline" aria-label="Who is this about" value={who[i.id] ?? ""} onChange={(e) => setWho({ ...who, [i.id]: e.target.value })}><option value="">Who is this about?</option>{data.people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}<option value="new">Someone new…</option></select>
+            {who[i.id] === "new" && <input className="plain-input" type="text" aria-label="New person's name" placeholder="Their name" value={fresh[i.id] ?? ""} onChange={(e) => setFresh({ ...fresh, [i.id]: e.target.value })} />}
+            <button className="btn" disabled={!who[i.id] || (who[i.id] === "new" && !fresh[i.id]?.trim())} onClick={() => act(async () => {
+              const pid = who[i.id] === "new" ? (await s.call<Ref>("/api/people/persons", json("POST", { name: fresh[i.id] }))).id : Number(who[i.id]);
+              await s.call("/api/people/interactions", json("POST", { person_id: pid, text: i.text, inbox_id: i.id }));
+            })}>File it</button>
             <button className="btn ghost" onClick={() => act(() => s.call(`/api/people/inbox/${i.id}/skip`, { method: "POST" }))}>Skip</button>
           </div>
         </section>

@@ -36,6 +36,22 @@ Paste this into Hermes as a skill or standing instruction, with the token filled
 
 ## Moving existing People notes over
 
-Ask Hermes (on its private model) to send the notes it holds about people to `/api/people-drop`, one item per
-conversation or per person. They appear in **People › It needs you › handed over**, where you pick who each is
-about and file it. Nothing is deleted from Hermes or Telegram.
+`/api/people-drop` takes a list. Each item is either plain text (lands in an unsorted pile) or an object that names
+the person, which is filed straight onto that person and creates them if they're new:
+
+```json
+{"source": "hermes", "items": [
+  {"person": "Full Name", "date": "2026-09-02", "text": "What happened, with their exact words in \"quotes\"."},
+  {"person": "Full Name", "type": "fact", "label": "Does", "text": "Runs a conference"},
+  {"person": "Full Name", "type": "question", "text": "An open question between us"},
+  {"person": "Full Name", "type": "goal", "text": "What I want this relationship to become"},
+  {"person": "Full Name", "type": "met", "text": "How we met"},
+  "Anything that isn't clearly about one person"
+]}
+```
+
+`type` defaults to a dated note. Up to 2000 items per call. Sending the same item twice files it once, so a dump
+can be re-run safely. The answer is counts only. Nothing is deleted from Hermes or Telegram.
+
+In Life Architect, people who arrive this way show under **People › Handed over · not set up yet**. Open one to say
+what you want the relationship to be, merge it into another entry ("Dana" and "Dana Lee"), rename it, or remove it.

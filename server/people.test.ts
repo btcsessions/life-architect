@@ -79,7 +79,7 @@ describe("people", () => {
     const { token } = await (await app.request("/api/settings/relay-token", { method: "POST" })).json();
     expect((await app.request("/api/people-drop", { method: "POST", headers: J, body: JSON.stringify({ text: "x" }) })).status).toBe(401);
     const res = await app.request("/api/people-drop", { method: "POST", headers: { ...J, authorization: `Bearer ${token}` }, body: JSON.stringify({ items: ["Old conversation one", "Old conversation two"], source: "hermes" }) });
-    expect(await res.json()).toEqual({ received: 2 });
+    expect(await res.json()).toEqual({ received: 2, filed: 0, unsorted: 2, people_created: 0, duplicates: 0 });
     // The relay itself still can't read anything about People.
     expect((await app.request("/api/people/inbox", { headers: { authorization: `Bearer ${token}` } })).status).toBe(423);
     const a = await json("POST", "/api/people/persons", { name: "Alex" });
@@ -88,6 +88,47 @@ describe("people", () => {
     await json("POST", "/api/people/interactions", { person_id: a.id, text: inbox.items[0].text, inbox_id: inbox.items[0].id });
     await json("POST", `/api/people/inbox/${inbox.items[1].id}/skip`);
     expect((await json("GET", "/api/people/home")).inbox).toBe(0);
+  });
+
+  it("files a named, dated hand-over straight onto people, once, and lets you merge or remove them after", async () => {
+    const { app, json, send } = await setup();
+    const { token } = await (await app.request("/api/settings/relay-token", { method: "POST" })).json();
+    const drop = async (items: unknown[]) => (await app.request("/api/people-drop", { method: "POST", headers: { ...J, authorization: `Bearer ${token}` }, body: JSON.stringify({ items, source: "hermes" }) })).json();
+    const dump = [
+      { person: "Dana Lee", date: "2026-09-02", text: 'First call. She said "send me the outline".', outcome: "hook" },
+      { person: "Dana Lee", date: "2026-10-15", text: "Coffee, talked dates." },
+      { person: "dana lee", type: "fact", label: "Does", text: "Runs a conference" },
+      { person: "Dana Lee", type: "question", text: "Which month works?" },
+      { person: "Dana Lee", type: "goal", text: "Co-host a workshop" },
+      { person: "Dana", date: "2026-08-01", text: "Met at the meetup." },
+      { person: "Mistake", text: "Not a real person." },
+      "Something with no name on it",
+    ];
+    const first = await drop(dump);
+    expect(first).toEqual({ received: 8, filed: 7, unsorted: 1, people_created: 3, duplicates: 0 });
+    expect(JSON.stringify(first)).not.toContain("Dana"); // counts only
+    expect(await drop(dump)).toMatchObject({ filed: 0, duplicates: 8 }); // running it twice is safe
+
+    let home = await json("GET", "/api/people/home");
+    expect(home.relationships.map((g: any) => g.title)).toEqual(["Co-host a workshop"]);
+    expect(home.unplaced.map((p: any) => p.name).sort()).toEqual(["Dana", "Mistake"]);
+    const lee = home.people.find((p: any) => p.name === "Dana Lee"), dana = home.people.find((p: any) => p.name === "Dana"), oops = home.people.find((p: any) => p.name === "Mistake");
+    let view = await json("GET", `/api/people/persons/${lee.id}`);
+    expect(view.log.map((i: any) => i.ts.slice(0, 10))).toEqual(["2026-10-15", "2026-09-02"]); // their real dates, newest first
+    expect(view.quotes[0].text).toBe("send me the outline");
+    expect(view.facts[0]).toMatchObject({ label: "Does", grade: "O:sys" });
+    expect(view.threads).toHaveLength(1);
+
+    // "Dana" and "Dana Lee" are the same person.
+    await json("POST", `/api/people/persons/${dana.id}/merge`, { into: lee.id });
+    view = await json("GET", `/api/people/persons/${lee.id}`);
+    expect(view.log).toHaveLength(3);
+    expect((await send("GET", `/api/people/persons/${dana.id}`)).status).toBe(404);
+    // The words of a filed note still can't be changed.
+    await json("DELETE", `/api/people/persons/${oops.id}`);
+    home = await json("GET", "/api/people/home");
+    expect(home.people.map((p: any) => p.name)).toEqual(["Dana Lee"]);
+    expect(home.unplaced).toHaveLength(0);
   });
 
   it("files what you tell it, only under people it knows, using People's own model", async () => {
