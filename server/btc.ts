@@ -18,7 +18,7 @@ const GAP = 20;
 export function parseKey(input: string): { hd: HDKey; type: AddrType | null; xpub: string; end: string } {
   const text = input.trim();
   if (/\b[xyzYZ]prv[1-9A-HJ-NP-Za-km-z]{20,}/.test(text)) throw new Error("That's a private key. Only paste the public one (xpub, ypub or zpub).");
-  if (/\b(multi|sortedmulti)\(/.test(text) || /\b[YZ]pub/.test(text)) throw new Error("Multisig wallets aren't supported yet. Only single-key wallets.");
+  if (/\b(multi|sortedmulti)\(/.test(text)) throw new Error("That's a multisig descriptor.");
   const key = text.match(/[xyz]pub[1-9A-HJ-NP-Za-km-z]{90,120}/)?.[0];
   if (!key) throw new Error("That doesn't look like an xpub, ypub or zpub.");
   let type: AddrType | null = key.startsWith("zpub") ? "wpkh" : key.startsWith("ypub") ? "sh-wpkh" : null;
@@ -39,6 +39,74 @@ export function addressOf(hd: HDKey, type: AddrType, chain: number, index: numbe
   return btc.p2tr(pub.slice(1)).address!;
 }
 
+/* ---------- Multisig descriptors ---------- */
+export interface MultiSpec { script: "wsh" | "sh-wsh" | "sh"; m: number; sorted: boolean; keys: Array<{ xpub: string; path: Array<number | "chain"> }>; chains: number[][] }
+export const MULTI_NAMES: Record<MultiSpec["script"], string> = { wsh: "Native SegWit multisig (bc1q…)", "sh-wsh": "Nested SegWit multisig (3…)", sh: "Legacy multisig (3…)" };
+const anyPub = /^(?:\[[^\]]*\])?([xyzYZ]pub[1-9A-HJ-NP-Za-km-z]{90,120})((?:\/[^,)\s]+)*)$/;
+const toXpub = (key: string) => { let raw: Uint8Array; try { raw = b58.decode(key); } catch { throw new Error(`One of the keys has a typo in it (…${key.slice(-6)}).`); } raw.set([0x04, 0x88, 0xb2, 0x1e], 0); return b58.encode(raw); };
+
+/**
+ * Read a multisig output descriptor: wsh(sortedmulti(2,[fp/48h/0h/0h/2h]xpub…/<0;1>/*,…)), also multi(), sh(wsh(…)) and sh(…).
+ * Accepts the receive descriptor alone (/0/*), the receive and change descriptors pasted together, or the <0;1> form.
+ */
+export function parseMulti(input: string): MultiSpec {
+  if (/\b[xyzYZ]prv/.test(input)) throw new Error("That contains a private key. Only paste the public descriptor.");
+  const found = [...input.replace(/\s+/g, "").replace(/'/g, "h").matchAll(/(sh\(wsh|wsh|sh)\((sortedmulti|multi)\((\d+),([^()]+)\)\)\)?(?:#[a-z0-9]{8})?/g)];
+  if (!found.length) throw new Error("That doesn't look like a multisig descriptor. It should look like wsh(sortedmulti(2,[…]xpub…/0/*,…)).");
+  const specs = found.map((m) => {
+    const script = (m[1] === "sh(wsh" ? "sh-wsh" : m[1]) as MultiSpec["script"], sorted = m[2] === "sortedmulti", need = +m[3];
+    const keys = m[4].split(",").map((part) => {
+      const k = part.match(anyPub);
+      if (!k) throw new Error("One of the keys in that descriptor isn't an extended public key. Raw public keys and Taproot multisig aren't supported.");
+      const segs = k[2].split("/").filter(Boolean);
+      if (segs.some((x) => /h$/.test(x))) throw new Error("That descriptor has a hardened step after the xpub, which can't be followed from a public key.");
+      if (segs[segs.length - 1] !== "*") throw new Error("Each key should end in /* (a wallet descriptor, not a single address).");
+      const path: Array<number | "chain"> = [], chains: number[] = [];
+      segs.slice(0, -1).forEach((x, i, all) => {
+        const multi = x.match(/^<(\d+);(\d+)>$/);
+        if (multi) { path.push("chain"); chains.push(+multi[1], +multi[2]); }
+        else if (/^\d+$/.test(x)) { if (i === all.length - 1 && !all.some((y) => y.startsWith("<"))) { path.push("chain"); chains.push(+x); } else path.push(+x); }
+        else throw new Error("Couldn't read the path after one of the keys.");
+      });
+      return { xpub: toXpub(k[1]), path, chains };
+    });
+    if (need < 1 || need > keys.length || keys.length > 15) throw new Error("The number of signers in that descriptor doesn't add up.");
+    return { script, m: need, sorted, keys };
+  });
+  const first = specs[0];
+  // Chains: from <0;1>, or from two descriptors pasted together (receive then change), or receive with change assumed at 1.
+  const perKey = first.keys[0].chains;
+  let chains: number[];
+  if (perKey.length === 2) chains = perKey;
+  else if (perKey.length === 1) {
+    const second = specs[1]?.keys[0].chains[0];
+    chains = second !== undefined && second !== perKey[0] ? [perKey[0], second] : perKey[0] === 0 ? [0, 1] : [perKey[0]];
+  } else chains = [];
+  return { script: first.script, m: first.m, sorted: first.sorted, keys: first.keys.map((k) => ({ xpub: k.xpub, path: k.path })), chains: chains.length ? chains.map((c) => [c]) : [[]] };
+}
+
+const cmp = (a: Uint8Array, b: Uint8Array) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
+export function multiAddress(spec: MultiSpec, hds: HDKey[], chain: number[], index: number): string {
+  let pubs = spec.keys.map((k, i) => {
+    let node = hds[i];
+    for (const step of k.path) node = node.deriveChild(step === "chain" ? chain[0] : step);
+    return node.deriveChild(index).publicKey!;
+  });
+  if (spec.sorted) pubs = [...pubs].sort(cmp);
+  const ms = btc.p2ms(spec.m, pubs);
+  return (spec.script === "wsh" ? btc.p2wsh(ms) : spec.script === "sh-wsh" ? btc.p2sh(btc.p2wsh(ms)) : btc.p2sh(ms)).address!;
+}
+
+/** One way to get "address number N on chain C" for any wallet row, single-key or multisig. */
+export function walletAddresses(w: { xpub: string; type: string; spec?: string | null }): { chains: number; at: (chain: number, index: number) => string } {
+  if (w.spec) {
+    const spec = JSON.parse(w.spec) as MultiSpec, hds = spec.keys.map((k) => HDKey.fromExtendedKey(k.xpub));
+    return { chains: spec.chains.length, at: (c, i) => multiAddress(spec, hds, spec.chains[c], i) };
+  }
+  const hd = HDKey.fromExtendedKey(w.xpub);
+  return { chains: 2, at: (c, i) => addressOf(hd, w.type as AddrType, c, i) };
+}
+
 interface ApiTx { txid: string; fee?: number; status?: { confirmed?: boolean; block_time?: number }; vin: Array<{ prevout?: { scriptpubkey_address?: string; value?: number } | null }>; vout: Array<{ scriptpubkey_address?: string; value?: number }> }
 const dayOf = (unix: number) => new Date(unix * 1000).toISOString().slice(0, 10);
 const publicHost = (url: string) => { try { const h = new URL(url).hostname; return !/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(h) && h.includes(".") && !/\.(local|lan|internal)$/.test(h); } catch { return false; } };
@@ -53,7 +121,7 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
     CREATE TABLE IF NOT EXISTS btc_price (day TEXT PRIMARY KEY, cad REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS btc_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
-  if (!(db.prepare("PRAGMA table_info(btc_wallet)").all() as Array<{ name: string }>).some((c) => c.name === "key_end")) db.exec("ALTER TABLE btc_wallet ADD COLUMN key_end TEXT");
+  for (const col of ["key_end", "spec"]) if (!(db.prepare("PRAGMA table_info(btc_wallet)").all() as Array<{ name: string }>).some((c) => c.name === col)) db.exec(`ALTER TABLE btc_wallet ADD COLUMN ${col} TEXT`);
   const conf = (k: string) => (db.prepare("SELECT value FROM btc_config WHERE key = ?").get(k) as { value: string } | undefined)?.value ?? "";
   const setConf = (k: string, v: string) => db.prepare("INSERT INTO btc_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v);
   const base = (k: string) => conf(k).replace(/\/+$/, "");
@@ -108,12 +176,12 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
 
   /** Walk one wallet's addresses until 20 in a row are unused, on both the receive and change chains. */
   async function scan(w: any): Promise<Map<string, ApiTx>> {
-    const hd = HDKey.fromExtendedKey(w.xpub);
+    const addrs = walletAddresses(w);
     const txs = new Map<string, ApiTx>();
-    for (const chain of [0, 1]) {
+    for (let chain = 0; chain < addrs.chains; chain++) {
       let quiet = 0;
       for (let idx = 0; quiet < GAP && idx < 5000; idx += 5) {
-        const batch = [0, 1, 2, 3, 4].map((k) => ({ idx: idx + k, address: addressOf(hd, w.type as AddrType, chain, idx + k) }));
+        const batch = [0, 1, 2, 3, 4].map((k) => ({ idx: idx + k, address: addrs.at(chain, idx + k) }));
         const results: ApiTx[][] = [];
         if (publicHost(base("api"))) { for (const a of batch) results.push(await addressTxs(a.address)); } // one at a time on a public server
         else results.push(...(await Promise.all(batch.map((a) => addressTxs(a.address)))));
@@ -194,7 +262,7 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
     const now = await priceNow();
     const wallets = (db.prepare("SELECT * FROM btc_wallet ORDER BY id").all() as any[]).map((w) => {
       const s = db.prepare("SELECT coalesce(sum(net), 0) AS sats, count(*) AS n, sum(confirmed = 0) AS pending FROM btc_tx WHERE wallet_id = ?").get(w.id) as any;
-      return { id: w.id, label: w.label, type: w.type, type_name: TYPE_NAMES[w.type as AddrType], key_end: w.key_end ?? w.xpub.slice(-6), synced_at: w.synced_at, sats: s.sats, transactions: s.n, pending: s.pending ?? 0, cad: now ? Math.round((s.sats / 1e8) * now * 100) / 100 : null };
+      return { id: w.id, label: w.label, type: w.type, type_name: w.spec ? `${JSON.parse(w.spec).m}-of-${JSON.parse(w.spec).keys.length} ${MULTI_NAMES[JSON.parse(w.spec).script as MultiSpec["script"]]}` : TYPE_NAMES[w.type as AddrType], key_end: w.key_end ?? w.xpub.slice(-6), synced_at: w.synced_at, sats: s.sats, transactions: s.n, pending: s.pending ?? 0, cad: now ? Math.round((s.sats / 1e8) * now * 100) / 100 : null };
     });
     return {
       wallets, price: now, total_sats: wallets.reduce((a, w) => a + w.sats, 0), total_cad: now ? Math.round(wallets.reduce((a, w) => a + (w.cad ?? 0), 0) * 100) / 100 : null,
@@ -223,6 +291,18 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
     const label = String(b.label ?? "").trim().slice(0, 60);
     if (!label) return c.json({ error: "Give the wallet a name, like Spending or Taxes." }, 400);
     if (db.prepare("SELECT 1 FROM btc_wallet WHERE lower(label) = lower(?)").get(label)) return c.json({ error: "There's already a wallet with that name." }, 409);
+    if (/\b(multi|sortedmulti)\(/.test(String(b.key ?? ""))) {
+      let spec: MultiSpec;
+      try { spec = parseMulti(String(b.key)); } catch (e) { return c.json({ error: (e as Error).message }, 400); }
+      // The same set of keys and rules is the same wallet, however it was pasted.
+      const idOf = "multi:" + createHash("sha256").update(JSON.stringify([spec.script, spec.m, spec.sorted, spec.keys, spec.chains])).digest("hex");
+      if (db.prepare("SELECT 1 FROM btc_wallet WHERE xpub = ?").get(idOf)) return c.json({ error: "That wallet is already added." }, 409);
+      const row = { xpub: idOf, type: `multi-${spec.script}`, spec: JSON.stringify(spec) };
+      let first: string;
+      try { first = walletAddresses(row).at(0, 0); } catch { return c.json({ error: "Couldn't build addresses from that descriptor." }, 400); }
+      const id = Number(db.prepare("INSERT INTO btc_wallet (label, xpub, type, created_at, key_end, spec) VALUES (?, ?, ?, ?, ?, ?)").run(label, row.xpub, row.type, ctx.now().toISOString(), spec.keys[0].xpub.slice(-6), row.spec).lastInsertRowid);
+      return c.json({ id, label, type: row.type, signers: `${spec.m} of ${spec.keys.length}`, first_address: first });
+    }
     let k;
     try { k = parseKey(String(b.key ?? "")); } catch (e) { return c.json({ error: (e as Error).message }, 400); }
     if (db.prepare("SELECT 1 FROM btc_wallet WHERE xpub = ?").get(k.xpub) && !TYPES.includes(b.type)) return c.json({ error: "That key is already added." }, 409);

@@ -396,7 +396,7 @@ function Bitcoin({ s, onChanged, onError }: { s: Session; onChanged: () => void;
   return (
     <section className="card pad stack">
       <div className="row"><span className="eyebrow grow">Bitcoin{v.price ? ` · 1 BTC = ${cad(v.price)} CAD` : ""}</span>{v.wallets.length > 0 && <button className="btn" disabled={busy !== null} onClick={sync}>{busy === "sync" ? "Checking the chain…" : "Sync now"}</button>}</div>
-      {v.wallets.length === 0 ? <p className="muted" style={{ margin: 0 }}>Add a wallet's public key (xpub, ypub or zpub) to track its balance and count what you're paid in bitcoin. It's watch-only: nothing here can spend.</p> : (
+      {v.wallets.length === 0 ? <p className="muted" style={{ margin: 0 }}>Add a wallet's public key (xpub, ypub, zpub) or multisig descriptor to track its balance and count what you're paid in bitcoin. It's watch-only: nothing here can spend.</p> : (
         <>
           <span className="next-title" style={{ fontSize: 32 }}>{cad(v.total_cad)}</span>
           <span className="muted small">{btcOf(v.total_sats)} across {v.wallets.length} wallet{v.wallets.length === 1 ? "" : "s"} · valued at today's price</span>
@@ -413,7 +413,7 @@ function Bitcoin({ s, onChanged, onError }: { s: Session; onChanged: () => void;
           </ul>
         </>
       )}
-      {note && <p className="small electro" role="status" style={{ margin: 0 }}>{note}</p>}
+      {note && <p className="small electro" role="status" style={{ margin: 0, overflowWrap: "anywhere" }}>{note}</p>}
       {!v.api && <p className="accent small" style={{ margin: 0 }}>Set the address server before syncing.</p>}
       {v.api_is_public && <p className="accent small" style={{ margin: 0 }}>The address server is a public one, so its operator can see which addresses are yours. Your own node's mempool app avoids that.</p>}
       <div className="row">
@@ -421,14 +421,14 @@ function Bitcoin({ s, onChanged, onError }: { s: Session; onChanged: () => void;
         <button className="btn ghost" onClick={() => setOpen(open === "server" ? null : "server")}>Address server</button>
       </div>
       {open === "add" && (
-        <form className="form" onSubmit={(e) => { e.preventDefault(); run("add", async () => { await s.call("/api/money/btc/wallets", json("POST", { ...f, type: f.type || undefined })); setF({ label: "", key: "", type: "" }); setOpen(null); setNote("Wallet added. Tap Sync now to load its history."); }); }}>
+        <form className="form" onSubmit={(e) => { e.preventDefault(); run("add", async () => { const r = await s.call<{ first_address: string; signers?: string }>("/api/money/btc/wallets", json("POST", { ...f, type: f.type || undefined })); setF({ label: "", key: "", type: "" }); setOpen(null); setNote(`Wallet added${r.signers ? ` (${r.signers} multisig)` : ""}. Its first receive address is ${r.first_address}. If that matches your wallet, tap Sync now.`); }); }}>
           <div className="fields">
             <label htmlFor="bl">Name this account<input id="bl" type="text" required placeholder="Spending, Taxes, Savings…" value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} /></label>
             <label htmlFor="bt">Address type<select id="bt" value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })}><option value="">Work it out for me</option>{Object.entries(v.types).map(([k, n]) => <option key={k} value={k}>{n}</option>)}</select></label>
           </div>
-          <label htmlFor="bk" className="eyebrow">Public key (xpub, ypub, zpub) or descriptor</label>
+          <label htmlFor="bk" className="eyebrow">Public key (xpub, ypub, zpub) or output descriptor, including multisig</label>
           <textarea id="bk" className="plain" required autoCapitalize="off" autoCorrect="off" spellCheck={false} value={f.key} onChange={(e) => setF({ ...f, key: e.target.value })} />
-          <p className="muted small" style={{ margin: 0 }}>Public keys only. Never paste a seed phrase or a private key anywhere. Single-key wallets only for now, not multisig.</p>
+          <p className="muted small" style={{ margin: 0 }}>Public keys only. Never paste a seed phrase or a private key anywhere. For multisig, paste the output descriptor from your coordinator, e.g. wsh(sortedmulti(2,[…]xpub…/&lt;0;1&gt;/*,…)). The address type is read from the descriptor.</p>
           <div className="row"><button className="btn" type="submit" disabled={busy !== null}>{busy === "add" ? "Adding…" : "Add wallet"}</button></div>
         </form>
       )}

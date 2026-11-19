@@ -2,7 +2,7 @@ import { describe, expect, it, afterEach, vi } from "vitest";
 import { HDKey } from "@scure/bip32";
 import { openDb } from "./db.ts";
 import { createApp } from "./app.ts";
-import { addressOf, parseKey } from "./btc.ts";
+import { addressOf, parseKey, parseMulti, walletAddresses } from "./btc.ts";
 
 const J = { "content-type": "application/json" };
 afterEach(() => vi.unstubAllGlobals());
@@ -22,6 +22,44 @@ describe("bitcoin keys", () => {
     expect(() => parseKey("xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi")).toThrow(/private/);
     expect(() => parseKey(ZPUB.slice(0, -2) + "zz")).toThrow(/typo/);
     expect(() => parseKey("hello")).toThrow();
+  });
+});
+
+describe("multisig descriptors", () => {
+  const seeds = [3, 4, 5].map((n) => HDKey.fromMasterSeed(new Uint8Array(32).fill(n)).derive("m/48'/0'/0'/2'"));
+  const xp = seeds.map((k) => k.publicExtendedKey);
+  // Worked out here without the address library: the 2-of-3 script, hashed, as a bech32 address.
+  const byHand = async (pubs: Uint8Array[]) => {
+    const { bech32 } = await import("@scure/base");
+    const { createHash } = await import("node:crypto");
+    const script = Buffer.concat([Buffer.from([0x52]), ...pubs.map((p) => Buffer.concat([Buffer.from([33]), Buffer.from(p)])), Buffer.from([0x53, 0xae])]);
+    return bech32.encode("bc", [0, ...bech32.toWords(createHash("sha256").update(script).digest())]);
+  };
+  const sortedPubs = (chain: number, i: number) => seeds.map((k) => k.deriveChild(chain).deriveChild(i).publicKey!).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+
+  it("reads the usual shapes and builds the right addresses", async () => {
+    const one = parseMulti(`wsh(sortedmulti(2,[aaaaaaaa/48'/0'/0'/2']${xp[0]}/<0;1>/*,[bbbbbbbb/48h/0h/0h/2h]${xp[1]}/<0;1>/*,[cccccccc/48h/0h/0h/2h]${xp[2]}/<0;1>/*))#abcd1234`);
+    expect(one).toMatchObject({ script: "wsh", m: 2, sorted: true, chains: [[0], [1]] });
+    const w = walletAddresses({ xpub: "x", type: "multi-wsh", spec: JSON.stringify(one) });
+    expect(w.at(0, 0)).toBe(await byHand(sortedPubs(0, 0)));
+    expect(w.at(1, 7)).toBe(await byHand(sortedPubs(1, 7)));
+    // Receive-only descriptor: change is assumed on /1. Receive and change pasted together: same wallet.
+    const recv = `wsh(sortedmulti(2,${xp[0]}/0/*,${xp[1]}/0/*,${xp[2]}/0/*))`;
+    expect(parseMulti(recv).chains).toEqual([[0], [1]]);
+    expect(parseMulti(`${recv}\n${recv.replace(/\/0\/\*/g, "/1/*")}`).chains).toEqual([[0], [1]]);
+    expect(walletAddresses({ xpub: "x", type: "m", spec: JSON.stringify(parseMulti(recv)) }).at(0, 0)).toBe(w.at(0, 0));
+    // multi() keeps the order as written, so it's a different wallet unless the keys happen to be sorted.
+    const unsorted = parseMulti(`wsh(multi(2,${xp[2]}/0/*,${xp[1]}/0/*,${xp[0]}/0/*))`);
+    expect(unsorted.sorted).toBe(false);
+    // The wrapped kinds make 3… addresses.
+    expect(walletAddresses({ xpub: "x", type: "m", spec: JSON.stringify(parseMulti(`sh(wsh(sortedmulti(2,${xp[0]}/0/*,${xp[1]}/0/*)))`)) }).at(0, 0)).toMatch(/^3/);
+    expect(walletAddresses({ xpub: "x", type: "m", spec: JSON.stringify(parseMulti(`sh(sortedmulti(1,${xp[0]}/0/*,${xp[1]}/0/*))`)) }).at(0, 0)).toMatch(/^3/);
+  });
+  it("refuses what it can't follow", () => {
+    expect(() => parseMulti(`wsh(sortedmulti(4,${xp[0]}/0/*,${xp[1]}/0/*))`)).toThrow(/add up/);
+    expect(() => parseMulti(`wsh(sortedmulti(2,${xp[0]}/0h/*,${xp[1]}/0/*))`)).toThrow(/hardened/);
+    expect(() => parseMulti(`wsh(sortedmulti(2,${xp[0]}/0/5,${xp[1]}/0/5))`)).toThrow(/\/\*/);
+    expect(() => parseMulti("tr(abc)")).toThrow();
   });
 });
 
@@ -58,6 +96,12 @@ describe("bitcoin wallets in Money", () => {
     expect(added).toMatchObject({ type: "wpkh", first_address: a(0, 0) });
     await call("POST", "/api/money/btc/wallets", { label: "Taxes", key: B.publicExtendedKey, type: "wpkh" });
     expect((await call("POST", "/api/money/btc/wallets", { label: "Spending", key: ZPUB })).status).toBe(409);
+    const M = [7, 8].map((n) => HDKey.fromMasterSeed(new Uint8Array(32).fill(n)).derive("m/48'/0'/0'/2'").publicExtendedKey);
+    const vault = await (await call("POST", "/api/money/btc/wallets", { label: "Vault", key: `wsh(sortedmulti(2,[11111111/48h/0h/0h/2h]${M[0]}/<0;1>/*,[22222222/48h/0h/0h/2h]${M[1]}/<0;1>/*))` })).json();
+    expect(vault).toMatchObject({ signers: "2 of 2", type: "multi-wsh" });
+    expect(vault.first_address).toMatch(/^bc1q.{58}$/); // a script address, longer than a single-key one
+    expect((await call("POST", "/api/money/btc/wallets", { label: "Vault again", key: `wsh(sortedmulti(2,${M[0]}/<0;1>/*,${M[1]}/<0;1>/*))` })).status).toBe(409);
+    await call("DELETE", `/api/money/btc/wallets/${vault.id}`);
 
     expect(await (await call("POST", "/api/money/btc/sync")).json()).toEqual({ wallets: 2, transactions: 4, transfers: 1 });
     const v = await (await call("GET", "/api/money/btc")).json();
