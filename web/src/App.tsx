@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, call, dueLabel, type AreaView, type Config, type Deck, type Task } from "./api";
+import { api, call, json, dueLabel, type AreaView, type Config, type Deck, type Task } from "./api";
 import { SettingsPanel } from "./Settings";
 import { Travel } from "./Travel";
 import { Money } from "./Money";
@@ -232,6 +232,8 @@ function Module(props: {
       {open && (
         <div className="module-body">
           {props.onOpenScreen && <button className="btn open-screen" onClick={props.onOpenScreen}>Open {SCREENS[area.id]}</button>}
+          {area.id === "inbox" && (area.mail ?? 0) > 0 && <p className="accent small">{area.mail} email{area.mail === 1 ? "" : "s"} waiting on you.</p>}
+          {area.id === "build" && <Noticed act={act} />}
           {area.locked ? (
             <p className="muted">{area.need > 0 ? "Something due. " : ""}Details are behind the People PIN.</p>
           ) : area.items.length === 0 ? (
@@ -434,5 +436,26 @@ function QuickAdd({ stt, onFiled, onError }: { stt: boolean; onFiled: (t: Task[]
         </button>
       </form>
     </footer>
+  );
+}
+
+/** Patterns the app has spotted. A yes adds a Build task; a no makes it go away for good. */
+function Noticed({ act }: { act: (fn: () => Promise<unknown>) => void }) {
+  const [list, setList] = useState<Array<{ key: string; text: string }>>([]);
+  const load = useCallback(() => call<{ suggestions: Array<{ key: string; text: string }> }>("/api/noticed").then((r) => setList(r.suggestions)).catch(() => {}), []);
+  useEffect(() => { load(); }, [load]);
+  if (list.length === 0) return <p className="muted small">Noticed: nothing yet. When you repeat something often enough, it'll be suggested here.</p>;
+  const answer = (key: string, a: "yes" | "no") => { setList(list.filter((x) => x.key !== key)); act(() => call("/api/noticed", json("POST", { key, answer: a }))); };
+  return (
+    <div className="noticed">
+      <span className="eyebrow electro">Noticed</span>
+      {list.map((x) => (
+        <div key={x.key} className="noticed-item">
+          <span className="grow">{x.text}</span>
+          <button className="btn" onClick={() => answer(x.key, "yes")}>Add to Build</button>
+          <button className="btn ghost" onClick={() => answer(x.key, "no")}>No</button>
+        </div>
+      ))}
+    </div>
   );
 }

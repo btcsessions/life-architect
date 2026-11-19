@@ -8,6 +8,8 @@ import { mountFiles } from "./files.ts";
 import { mountTravel } from "./travel.ts";
 import { mountMoney } from "./money.ts";
 import { mountPeople } from "./people.ts";
+import { mountMail, type MailFactory } from "./mail.ts";
+import { mountNoticed } from "./noticed.ts";
 
 /** Settings the user can change in the app. Each falls back to the environment variable of the same name. */
 export const SETTING_KEYS = [
@@ -35,8 +37,9 @@ export interface Ctx {
 
 const EDITABLE = ["title", "note", "importance", "due", "due_time", "minutes", "delegate", "area_id", "snoozed_until"] as const;
 
-export function createApp(db: Db, now: () => Date = () => new Date()) {
+export function createApp(db: Db, now: () => Date = () => new Date(), deps: { mail?: MailFactory } = {}) {
   const app = new Hono();
+  let mailWaiting = () => 0;
   const day = () => today(now());
 
   const setting = (k: SettingKey): string => {
@@ -175,7 +178,8 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
         id: a.id,
         name: a.name,
         locked: Boolean(a.locked),
-        need,
+        need: need + (a.id === "inbox" ? mailWaiting() : 0),
+        mail: a.id === "inbox" ? mailWaiting() : undefined,
         items: a.locked
           ? []
           : mine.map((t) => ({ ...t, needs_you: needIds.has(t.id) })),
@@ -294,6 +298,9 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
   mountTravel(app, ctx);
   mountMoney(app, ctx);
   mountPeople(app, ctx);
+  const mail = mountMail(app, ctx, deps.mail);
+  mailWaiting = mail.waiting;
+  mountNoticed(app, ctx);
 
-  return app;
+  return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected });
 }

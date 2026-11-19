@@ -13,7 +13,7 @@ export interface Task {
   needs_you?: boolean;
   area_name?: string;
 }
-export interface AreaView { id: string; name: string; locked: boolean; need: number; items: Task[] }
+export interface AreaView { id: string; name: string; locked: boolean; need: number; mail?: number; items: Task[] }
 export interface NextItem { id: number; area_id: string; title: string; locked: boolean; why: string[] }
 export interface Deck { today: string; next: NextItem[]; areas: AreaView[]; addedToday: number }
 export interface Config { model: string | null; stt: boolean }

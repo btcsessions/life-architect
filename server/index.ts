@@ -17,3 +17,6 @@ const port = Number(process.env.PORT ?? 4600);
 serve({ fetch: app.fetch, port, hostname: process.env.HOST ?? "0.0.0.0" }, () =>
   console.log(`Life Architect listening on :${port}`),
 );
+
+// Check Gmail every 10 minutes once it's connected. Failures are quiet; the Inbox screen shows the last good sync.
+setInterval(() => { if (app.mailConnected()) app.syncMail().catch(() => {}); }, 10 * 60_000).unref();

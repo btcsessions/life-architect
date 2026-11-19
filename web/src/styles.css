@@ -218,3 +218,14 @@ code { font: 12px ui-monospace, Menlo, Consolas, monospace; }
 .form > input[type="text"] { width: 100%; }
 .fact { flex-wrap: wrap; }
 .fact > .grow { min-width: 120px; }
+
+/* Inbox and Noticed */
+button.status { background: transparent; color: var(--label); }
+.mail { overflow: hidden; }
+.mail-head { width: 100%; display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: transparent; border: 0; text-align: left; min-height: 60px; overflow-wrap: anywhere; }
+.mail.open { border-color: var(--label-3); }
+.mail-quick { padding: 0 18px 14px; }
+textarea.tall { min-height: 180px; }
+.noticed { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.noticed-item { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border: 1px dashed var(--electro); border-radius: var(--r-tile); }
+.noticed-item .grow { min-width: 200px; }

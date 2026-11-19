@@ -1,67 +1,63 @@
 # Life Architect
 
 One deck for everything on your plate, served from your Umbrel and reached over Tailscale.
-This is **Phase 1** of the build plan: the deck and quick-add.
 
-## What works now
+## What's in it
 
-- **Next up**: one ranked list from three things you give each task: importance, due date, time needed.
-  "Done, what's next?" advances it; "Not today" hides a task until tomorrow.
+- **Next up**: one ranked list from importance, due date and time needed. "Done, what's next?" advances it.
+- **Quick-add**: type, talk, or attach. "Finish the outline by Thursday, important, 90 minutes. Ask Nathan to redo
+  the thumbnail." is split into tasks and filed. Voice uses the Whisper service bundled with the Umbrel app.
 - **Modules**: Work, Travel & Speaking, Family, Health, Inbox, Hobbies & Learning, Build & Automate, Money, People.
-  Collapsed, with a badge for what needs you. Click to expand, click a task to change its details.
-- **Quick-add**: type (or speak, once speech-to-text is set up) something like
-  *"Finish the YubiKey outline by Thursday, important, 90 minutes. Ask Nathan to redo the thumbnail."*
-  It is split into tasks and filed. Links you include are kept on the task.
-- **Settings** (top right): enter the address, model name and key for the model that files quick-adds, and for
-  speech-to-text. Keys are saved on the Umbrel and never shown again. "Save and test" checks the connection.
-- **People** is a sealed placeholder: the deck never shows its task text, and quick-add never files into it.
+- **Travel**: trips with flights, stay, costs, documents and a schedule you can send to Google Calendar.
+- **Inbox**: reads Gmail with an app password, sorts it (for you / hand off / couldn't place / nothing to do),
+  writes replies from what you say, and hands mail to people by email. Nothing is sent without a tap. It learns
+  who gets what; automatic hand-off is off until you switch it on in Settings, and then only for a sender you've
+  handed to the same person three times. Gmail itself is never changed.
+- **Money** (PIN): import bank statements (CSV), see where it goes, drill into categories, spot subscriptions.
+  The Money model only ever sees merchant names.
+- **People** (PIN): relationships you're building and scenarios you're working toward, with notes that can't be
+  rewritten, word-for-word quotes, open questions, readings with graded claims, and a research library.
+  It uses only its own model. The deck and the relay show "People: something due" and nothing else.
+- **Noticed** (under Build & Automate): suggestions when you repeat something often enough to automate.
+- **Relay**: lets Hermes add to the deck and read out what's next. See [docs/hermes.md](docs/hermes.md).
 
-## Not built yet
+## Install and update
 
-File upload in quick-add, the Hermes relay (Phase 2), Inbox (3), Travel (4), the Money dashboard and PIN (5),
-People (6), automation suggestions (7).
+Add the community app store `https://github.com/btcsessions/umbrel-apps` in the Umbrel App Store, install
+Life Architect, and use **Update** there when a new version shows. Open `http://<umbrel-tailscale-ip>:4600`.
 
-## Install on the Umbrel
+Data lives in the app's data folder on the Umbrel: `life.db` (deck, travel, inbox, money), `people.db` (People,
+kept separate), and `files/`. Back those up.
 
-```sh
-git clone https://github.com/btcsessions/life-architect.git
-cd life-architect
-cp .env.example .env      # optional: edit to add a model or speech-to-text
-docker compose up -d --build
-```
+## Settings to fill in
 
-Open `http://<umbrel-tailscale-ip>:4600`.
+| What | Where | Notes |
+| --- | --- | --- |
+| Deck model | Settings › Model | Hermes: `http://hermes-agent_web_1:8642/v1`, pick the model from the list |
+| Money model | Settings › Money model | Its own model; without one, sorting uses rules |
+| People model | Settings › People model | Its own model; never falls back to the deck model |
+| Gmail | Settings › Gmail | Address, app password, your name on replies |
+| Relay token | Settings › Relay | Shown once; give it to Hermes |
+| PINs | Open Money / People | Set on first open. Locks after 15 idle minutes |
 
-Update later with:
-
-```sh
-git pull && docker compose up -d --build
-```
-
-Your data lives in `./data/life.db`. Back that file up; nothing else needs keeping.
+Keys and passwords are saved on the Umbrel and never shown again.
 
 ## Things to know
 
-- **No login yet.** Anyone who can reach the port can use the deck. Keep it on Tailscale: set `LA_BIND` in `.env`
-  to the Umbrel's Tailscale address so it does not listen on the home network.
-- **Voice.** The Umbrel app bundles a Whisper speech-to-text service, so the mic works after install (the first
-  start downloads its model, which takes a few minutes). Tap the mic, talk, tap again: it is written down and filed.
-- **Live recording needs HTTPS.** Browsers block the microphone on plain `http://` addresses. Without HTTPS the mic
-  button hands off to the device's own recorder instead, which works but takes more taps. Serving the deck through
-  Tailscale HTTPS (`tailscale serve`) gives one-tap recording and lets you install it as an app on your phone.
-- **Without a model, filing uses simple rules.** It recognises dates ("by Friday", "tomorrow"), time ("90 minutes"),
-  importance ("important", "low priority"), hand-offs ("ask Nathan to…") and a few topic words. Set `LLM_URL` and
-  `LLM_MODEL` to have a model do the filing; if the model fails, it falls back to the rules.
-- **How ranking works** is in `server/rank.ts`: importance counts most, then how close the due date is; quick tasks
-  get a small lift, and long tasks due within two days get one too.
+- **No login on the deck itself.** Anyone who can reach the port can use it. Keep it on Tailscale. Money and
+  People have their own PINs on top.
+- **Live recording needs HTTPS.** On plain `http://` the mic hands off to the device's recorder (more taps).
+- **Without a model**, filing and email sorting use simple rules, and email replies go out in your own words.
+- **People privacy.** PIN-locked on the server, separate database, never filed by quick-add, never returned by the
+  relay. The database is not encrypted on disk; someone with access to the Umbrel's files could read it.
 
 ## Develop
 
 ```sh
 npm install
 npm run dev:server   # API on :4600
-npm run dev:web      # web app with hot reload, proxies /api
+npm run dev:web      # web on :5173
 npm test
 ```
 
-Stack: Hono, React, SQLite. The look is the "Sessions" theme from Sessions Wallet.
+Pushing to `main` builds `ghcr.io/btcsessions/life-architect:<version in package.json>`.
