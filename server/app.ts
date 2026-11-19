@@ -11,6 +11,7 @@ import { mountPeople } from "./people.ts";
 import { mountMail, type MailFactory } from "./mail.ts";
 import { mountNoticed } from "./noticed.ts";
 import { mountAsks } from "./asks.ts";
+import { mountCommands, ROUTER, ACTION_KINDS, type Did } from "./commands.ts";
 
 /** Settings the user can change in the app. Each falls back to the environment variable of the same name. */
 export const SETTING_KEYS = [
@@ -31,7 +32,7 @@ export interface Ctx {
   /** The model for a module: its own if set, otherwise none (modules never borrow the deck's model silently). */
   modelFor: (prefix: "llm" | "money_llm" | "people_llm") => ModelConfig | null;
   /** File free text into deck tasks. Never files into People. */
-  capture: (text: string, source: string, opts?: { tasksOnly?: boolean }) => Promise<{ via: string; created: Array<Task & { area_name: string }>; asked: any[] }>;
+  capture: (text: string, source: string, opts?: { tasksOnly?: boolean }) => Promise<{ via: string; created: Array<Task & { area_name: string }>; asked: any[]; did: Did[] }>;
   /** Internal key/value store for things that aren't user settings (tokens, PIN hashes). */
   secret: { get: (k: string) => string | null; set: (k: string, v: string | null) => void };
 }
@@ -41,6 +42,7 @@ const EDITABLE = ["title", "note", "importance", "due", "due_time", "minutes", "
 export function createApp(db: Db, now: () => Date = () => new Date(), deps: { mail?: MailFactory } = {}) {
   const app = new Hono();
   let mailWaiting = () => 0;
+  let commands: ReturnType<typeof mountCommands> | null = null;
   let startAsk: (text: string, source: string) => unknown = () => null;
   let openAsks: () => unknown[] = () => [];
   const day = () => today(now());
@@ -197,8 +199,11 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
   // Only what's typed or said in the app itself can be an ask. Anything relayed in by Hermes is always a task,
   // so a request can never bounce back to the assistant that sent it.
   async function capture(text: string, source: string, opts: { tasksOnly?: boolean } = {}) {
-    const { items: all, via } = await fileCapture(text, day(), model());
-    const canAsk = !opts.tasksOnly && source === "app" && Boolean(model());
+    const fromApp = !opts.tasksOnly && source === "app";
+    const direct = fromApp ? commands?.people(text) : null;
+    if (direct) return { via: "direct", created: [], asked: [], did: direct };
+    const { items: all, actions, via } = await fileCapture(text, day(), model(), fetch, fromApp && commands ? { rules: ROUTER, context: commands.context(), kinds: ACTION_KINDS } : null);
+    const canAsk = fromApp && Boolean(model());
     const items = all.filter((f) => !(canAsk && f.kind === "ask"));
     const asked = all.filter((f) => canAsk && f.kind === "ask").map((f) => startAsk(f.title, source));
     db.prepare("INSERT INTO captures (text, source, via, created_at) VALUES (?, ?, ?, ?)").run(
@@ -206,7 +211,7 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
     );
     const names = Object.fromEntries(areas().map((a) => [a.id, a.name]));
     const created = items.map((f) => insert(f, source)).map((t) => ({ ...t, area_name: names[t.area_id] }));
-    return { via, created, asked };
+    return { via, created, asked, did: commands && actions.length ? await commands.run(actions) : [] };
   }
 
   // Quick-add: free text in, filed tasks out.
@@ -304,14 +309,15 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
   mountRelay(app, ctx);
   mountFiles(app, ctx);
   mountTravel(app, ctx);
-  mountMoney(app, ctx);
-  mountPeople(app, ctx);
+  const money = mountMoney(app, ctx);
+  const people = mountPeople(app, ctx);
   const mail = mountMail(app, ctx, deps.mail);
   mailWaiting = mail.waiting;
   mountNoticed(app, ctx);
   const asks = mountAsks(app, ctx);
   startAsk = asks.start;
   openAsks = asks.open;
+  commands = mountCommands(app, ctx, { addTx: money.addTx, peopleDrop: people.drop });
 
   return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected });
 }

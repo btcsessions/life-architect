@@ -232,7 +232,9 @@ export async function fileCapture(
   day: string,
   cfg: ModelConfig | null = modelFromEnv(),
   fetchFn: typeof fetch = fetch,
-): Promise<{ items: Filed[]; via: "model" | "rules" }> {
+  /** Extra kinds the model may return (see commands.ts), with the lists it needs to pick from. */
+  router: { rules: string; context: string; kinds: string[] } | null = null,
+): Promise<{ items: Filed[]; actions: any[]; via: "model" | "rules" }> {
   if (cfg) {
     try {
       const res = await fetchFn(`${cfg.url}/chat/completions`, {
@@ -242,7 +244,7 @@ export async function fileCapture(
           model: cfg.model,
           temperature: 0,
           messages: [
-            { role: "system", content: SYSTEM(day) },
+            { role: "system", content: SYSTEM(day) + (router ? router.rules + router.context : "") },
             { role: "user", content: text },
           ],
         }),
@@ -252,10 +254,13 @@ export async function fileCapture(
       const body: any = await res.json();
       const content: string = body?.choices?.[0]?.message?.content ?? "";
       const json = content.slice(content.indexOf("["), content.lastIndexOf("]") + 1);
-      return { items: validate(JSON.parse(json), day), via: "model" };
+      const raw = JSON.parse(json);
+      const actions = router && Array.isArray(raw) ? raw.filter((r: any) => r && router.kinds.includes(r.kind)) : [];
+      const rest = Array.isArray(raw) ? raw.filter((r: any) => !actions.includes(r)) : raw;
+      return { items: actions.length && Array.isArray(rest) && !rest.length ? [] : validate(rest, day), actions, via: "model" };
     } catch (err) {
       console.warn("[file] model filing failed, using rules:", (err as Error).message);
     }
   }
-  return { items: fileByRules(text, day), via: "rules" };
+  return { items: fileByRules(text, day), actions: [], via: "rules" };
 }

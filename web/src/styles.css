@@ -236,3 +236,5 @@ textarea.tall { min-height: 180px; }
 .ask.working { border-style: dashed; }
 .ask-text { color: var(--label-2); }
 .ask-reply { font-size: 16px; line-height: 1.45; white-space: pre-wrap; }
+.filed li.did { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.did-detail { white-space: pre-wrap; color: var(--label-2); background: var(--card-2); border-radius: var(--r-tile); padding: 10px 12px; overflow-wrap: anywhere; max-width: 100%; }

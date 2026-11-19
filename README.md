@@ -7,6 +7,10 @@ One deck for everything on your plate, served from your Umbrel and reached over 
 - **Next up**: one ranked list from importance, due date and time needed. "Done, what's next?" advances it.
 - **Quick-add**: type, talk, or attach. "Finish the outline by Thursday, important, 90 minutes. Ask Nathan to redo
   the thumbnail." is split into tasks and filed. Voice uses the Whisper service bundled with the Umbrel app.
+- **The main screen drives everything.** Besides tasks, quick-add can hand an instruction to Hermes, add a trip or a
+  booking, log spending, mark or change a task, and act on an email it finds by sender or subject (draft a reply,
+  hand it off, make a task, give it to Hermes). Email is drafted and waits for a Send tap. Start with "People:" to
+  drop a note straight into People without any model reading it. The module screens are for detail and control.
 - **Modules**: Work, Travel & Speaking, Family, Health, Inbox, Hobbies & Learning, Build & Automate, Money, People.
 - **Travel**: trips with flights, stay, costs, documents and a schedule you can send to Google Calendar.
 - **Inbox**: reads Gmail with an app password, sorts it (for you / hand off / couldn't place / nothing to do),

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { call, json } from "./api";
 import { MicButton, ScreenHead, useDictation } from "./ui";
 
-interface Mail { id: number; from_name: string; from_addr: string; subject: string; date: string; summary: string | null; bucket: string; suggest_name: string | null; suggest_email: string | null; status: string; handled_how: string | null }
+interface Mail { id: number; from_name: string; from_addr: string; subject: string; date: string; summary: string | null; bucket: string; suggest_name: string | null; suggest_email: string | null; status: string; has_draft?: boolean; handled_how: string | null }
 interface Person { name: string; email: string }
 interface Box { connected: boolean; user: string; synced: string | null; has_model: boolean; auto: boolean; you: Mail[]; unsure: Mail[]; handoff: Mail[]; fyi: Mail[]; handled: Mail[]; delegates: Person[] }
 type Props = { onBack: () => void; onError: (m: string) => void; stt?: boolean };
@@ -90,7 +90,7 @@ function Row({ m, open, onToggle, people, stt, hasModel, onError, onDone }: { m:
   const [busy, setBusy] = useState(false);
   const d = useDictation(stt, (t) => setSay((x) => (x ? x + " " : "") + t), onError);
 
-  useEffect(() => { if (open && body === null) call<{ body: string }>(`/api/inbox/${m.id}`).then((r) => setBody(r.body)).catch((e) => onError(e.message)); }, [open, body, m.id, onError]);
+  useEffect(() => { if (open && body === null) call<{ body: string; draft: string | null }>(`/api/inbox/${m.id}`).then((r) => { setBody(r.body); if (r.draft) { setDraft(r.draft); setMode("reply"); } }).catch((e) => onError(e.message)); }, [open, body, m.id, onError]);
   const run = async (fn: () => Promise<unknown>, after?: string) => { setBusy(true); try { await fn(); if (after) onDone(after); } catch (e) { onError((e as Error).message); } finally { setBusy(false); } };
   const makeDraft = () => run(async () => { const r = await call<{ text: string; note?: string }>(`/api/inbox/${m.id}/draft`, json("POST", { say })); setDraft(r.text); if (r.note) onError(r.note); });
   const hand = (p: Person, note = "") => run(() => call(`/api/inbox/${m.id}/handoff`, json("POST", { ...p, note, remember })), `Handed to ${p.name}.`);
@@ -99,6 +99,7 @@ function Row({ m, open, onToggle, people, stt, hasModel, onError, onDone }: { m:
     <div className={open ? "card mail open" : "card mail"}>
       <button className="mail-head" aria-expanded={open} onClick={onToggle}>
         <span className="grow"><strong>{m.from_name}</strong> <span className="muted small">{ago(m.date)}</span><span className="block">{m.subject}</span>{m.summary && <span className="muted small block">{m.summary}</span>}</span>
+        {m.has_draft && <span className="status ok">Draft ready</span>}
         {m.suggest_name && <span className="status ok">→ {m.suggest_name}</span>}
       </button>
       {!open && m.suggest_name && m.suggest_email && <div className="row mail-quick"><button className="btn" disabled={busy} onClick={() => hand({ name: m.suggest_name!, email: m.suggest_email! })}>Send to {m.suggest_name}</button></div>}

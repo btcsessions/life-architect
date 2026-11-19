@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, call, json, dueLabel, type Ask, type AreaView, type Config, type Deck, type Task } from "./api";
+import { api, call, json, dueLabel, type Ask, type Did, type AreaView, type Config, type Deck, type Task } from "./api";
 import { SettingsPanel } from "./Settings";
 import { Travel } from "./Travel";
 import { Money } from "./Money";
@@ -45,6 +45,7 @@ export function App() {
   const [open, setOpen] = useState<string | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
   const [filed, setFiled] = useState<Task[] | null>(null);
+  const [did, setDid] = useState<Did[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [view, setView] = useState<string>("deck");
   const [added, setAdded] = useState<Array<{ text: string; source: string }> | null>(null);
@@ -151,6 +152,8 @@ export function App() {
 
       {!deck && !error && <p className="muted">Loading your deck…</p>}
 
+      {view === "deck" && did.length > 0 && <DidList did={did} onClose={() => setDid([])} onOpen={(v) => { setDid([]); setView(v); }} onError={setError} onChanged={load} />}
+
       {filed && filed.length > 0 && (
         <div className="filed" role="status">
           <div className="filed-head">
@@ -171,7 +174,12 @@ export function App() {
       {view === "deck" && <QuickAdd
         stt={Boolean(config?.stt)}
         onError={setError}
-        onFiled={async (tasks) => { setFiled(tasks.length ? tasks : null); await load(); }}
+        onFiled={async (tasks, done) => {
+          // One notice, not two stacked: when other modules were touched, list new tasks alongside.
+          if (done.length) { setFiled(null); setDid([...tasks.map((t) => ({ module: t.area_name ?? "Deck", text: `Task added: ${t.title}`, ok: true })), ...done]); }
+          else { setDid([]); setFiled(tasks.length ? tasks : null); }
+          await load();
+        }}
       />}
     </div>
   );
@@ -329,7 +337,7 @@ function Editor({ task, areas, act, onClose }: { task: Task; areas: AreaView[]; 
   );
 }
 
-function QuickAdd({ stt, onFiled, onError }: { stt: boolean; onFiled: (t: Task[]) => void; onError: (m: string) => void }) {
+function QuickAdd({ stt, onFiled, onError }: { stt: boolean; onFiled: (t: Task[], did: Did[]) => void; onError: (m: string) => void }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<null | "hearing" | "filing">(null);
   const [recording, setRecording] = useState(false);
@@ -350,9 +358,9 @@ function QuickAdd({ stt, onFiled, onError }: { stt: boolean; onFiled: (t: Task[]
     if (!v) return;
     setBusy("filing");
     try {
-      const { created } = await api.capture(v);
+      const { created, did } = await api.capture(v);
       setText("");
-      onFiled(created);
+      onFiled(created, did ?? []);
     } catch (e) {
       // Keep what was said so it isn't lost if filing fails.
       setText(v);
@@ -482,5 +490,35 @@ function Asks({ asks, act }: { asks: Ask[]; act: (fn: () => Promise<unknown>) =>
         </div>
       ))}
     </section>
+  );
+}
+
+/** What a quick-add did in other modules, with any step that still needs a tap (like Send). */
+function DidList({ did, onClose, onOpen, onError, onChanged }: { did: Did[]; onClose: () => void; onOpen: (v: NonNullable<Did["open"]>) => void; onError: (m: string) => void; onChanged: () => void }) {
+  const [sent, setSent] = useState<Record<number, string>>({});
+  const [busy, setBusy] = useState<number | null>(null);
+  const go = async (i: number, a: NonNullable<Did["action"]>) => {
+    setBusy(i);
+    try { await call(a.path, json("POST", a.body)); setSent((s) => ({ ...s, [i]: a.done })); onChanged(); }
+    catch (e) { onError((e as Error).message); }
+    finally { setBusy(null); }
+  };
+  return (
+    <div className="filed" role="status">
+      <div className="filed-head"><span className="eyebrow accent">Done from here</span><button className="btn ghost" onClick={onClose}>Close</button></div>
+      <ul>
+        {did.map((d, i) => (
+          <li key={i} className="did">
+            <span className={d.ok ? "eyebrow electro" : "eyebrow accent"}>{d.module}{d.ok ? "" : " · not done"}</span>
+            <span>{sent[i] ?? d.text}</span>
+            {d.detail && !sent[i] && <span className="did-detail">{d.detail}</span>}
+            <span className="row">
+              {d.action && !sent[i] && <button className="btn" disabled={busy === i} onClick={() => go(i, d.action!)}>{busy === i ? "Sending…" : d.action.label}</button>}
+              {d.open && <button className="btn ghost" onClick={() => onOpen(d.open!)}>Open {d.open[0].toUpperCase() + d.open.slice(1)}</button>}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

@@ -83,6 +83,7 @@ export function mountMail(app: Hono, ctx: Ctx, factory: MailFactory = gmail) {
       id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL, mail_id INTEGER, to_addr TEXT NOT NULL, cc TEXT, subject TEXT NOT NULL, who TEXT, auto INTEGER NOT NULL DEFAULT 0
     );
   `);
+  if (!(db.prepare("PRAGMA table_info(mail)").all() as Array<{ name: string }>).some((c) => c.name === "draft")) db.exec("ALTER TABLE mail ADD COLUMN draft TEXT");
   const bad = (c: any, error: string, status = 400) => c.json({ error }, status);
   const now = () => ctx.now().toISOString();
   const client = (): MailClient | null => {
@@ -91,7 +92,7 @@ export function mountMail(app: Hono, ctx: Ctx, factory: MailFactory = gmail) {
   };
   const get = (id: number) => db.prepare("SELECT * FROM mail WHERE id = ?").get(id) as any;
   const delegates = () => db.prepare("SELECT name, email, SUM(uses) AS uses FROM mail_rules GROUP BY lower(email) ORDER BY uses DESC").all() as Array<{ name: string; email: string; uses: number }>;
-  const brief = (m: any) => ({ id: m.id, from_name: m.from_name, from_addr: m.from_addr, subject: m.subject, date: m.date, summary: m.summary, bucket: m.bucket, suggest_name: m.suggest_name, suggest_email: m.suggest_email, status: m.status, handled_how: m.handled_how, sorted_by: m.sorted_by });
+  const brief = (m: any) => ({ id: m.id, from_name: m.from_name, from_addr: m.from_addr, subject: m.subject, date: m.date, summary: m.summary, bucket: m.bucket, suggest_name: m.suggest_name, suggest_email: m.suggest_email, status: m.status, has_draft: Boolean(m.draft), handled_how: m.handled_how, sorted_by: m.sorted_by });
 
   async function handOff(m: any, name: string, email: string, note: string, auto: boolean, mc: MailClient) {
     const text = `${note ? `${note}\n\n` : `${name.split(" ")[0]}, can you take this one?\n\n`}---------- Forwarded message ----------\nFrom: ${m.from_name} <${m.from_addr}>\nDate: ${m.date}\nSubject: ${m.subject}\n\n${m.body}`;
@@ -178,7 +179,7 @@ export function mountMail(app: Hono, ctx: Ctx, factory: MailFactory = gmail) {
 
   app.get("/api/inbox/:id", (c) => {
     const m = get(Number(c.req.param("id")));
-    return m ? c.json({ ...brief(m), body: m.body }) : bad(c, "No such message.", 404);
+    return m ? c.json({ ...brief(m), body: m.body, draft: m.draft }) : bad(c, "No such message.", 404);
   });
 
   // Turn what was said into a reply. Nothing is sent here.

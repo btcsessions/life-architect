@@ -354,4 +354,5 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     return db.prepare("UPDATE money_assets SET value = ?, updated_at = ? WHERE id = ?").run(value, ctx.day(), Number(c.req.param("id"))).changes ? c.json({ ok: true }) : c.json({ error: "No such entry." }, 404);
   });
   app.delete("/api/money/assets/:id", (c) => (db.prepare("DELETE FROM money_assets WHERE id = ?").run(Number(c.req.param("id"))).changes ? c.json({ ok: true }) : c.json({ error: "No such entry." }, 404)));
+  return { addTx };
 }

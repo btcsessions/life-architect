@@ -430,4 +430,5 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     }
     return c.json(readingView(db.prepare("SELECT * FROM reading WHERE id = ?").get(r.id)));
   });
+  return { drop: (text: string, source: string) => { db.prepare("INSERT INTO inbox (ts, source, text) VALUES (?, ?, ?)").run(now(), source.slice(0, 40), text.slice(0, 20000)); } };
 }
