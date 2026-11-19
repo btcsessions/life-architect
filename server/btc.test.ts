@@ -93,6 +93,31 @@ describe("bitcoin wallets in Money", () => {
   });
 });
 
+describe("my own transaction types", () => {
+  it("adds, uses, renames and removes a type", async () => {
+    const app = createApp(openDb(":memory:"), () => new Date(2026, 10, 19, 12, 0, 0));
+    const cookie = (await app.request("/api/money/pin", { method: "POST", headers: J, body: JSON.stringify({ pin: "246810" }) })).headers.get("set-cookie")!.split(";")[0];
+    const call = async (method: string, path: string, body?: unknown) => app.request(path, { method, headers: { ...J, cookie }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const f = new FormData(); f.set("file", new File(["Date,Description,Amount\n2026-11-02,B&H PHOTO,-900\n2026-11-03,ZZ UNKNOWN,-20"], "s.csv")); f.set("account", "Visa");
+    await app.request("/api/money/import", { method: "POST", headers: { cookie }, body: f });
+    expect((await call("POST", "/api/money/categories", { name: "food" })).status).toBe(409); // built-in, any case
+    const added = await (await call("POST", "/api/money/categories", { name: "Camera gear" })).json();
+    expect(added.categories.slice(-4)).toEqual(["Camera gear", "Income", "Transfers", "Other"]);
+    const tx = (await (await call("GET", "/api/money/tx?month=2026-11")).json()).tx as any[];
+    const lens = tx.find((t) => t.description === "B&H PHOTO");
+    expect((await call("PATCH", `/api/money/tx/${lens.id}`, { category: "Camera gear", always: true })).status).toBe(200);
+    let sum = await (await call("GET", "/api/money/summary?month=2026-11")).json();
+    expect(sum.categories.find((c: any) => c.name === "Camera gear").total).toBe(900);
+    await call("PATCH", "/api/money/categories/Camera%20gear", { to: "Gear" });
+    sum = await (await call("GET", "/api/money/summary?month=2026-11")).json();
+    expect(sum.categories.map((c: any) => c.name)).toContain("Gear");
+    expect((await call("DELETE", "/api/money/categories/Food")).status).toBe(404); // built-ins stay
+    await call("DELETE", "/api/money/categories/Gear");
+    sum = await (await call("GET", "/api/money/summary?month=2026-11")).json();
+    expect(sum.categories.map((c: any) => c.name)).toEqual(["Other"]);
+  });
+});
+
 describe("transfers between my own accounts", () => {
   it("pairs a chequing-to-savings move and a card payment, leaves look-alikes alone, and lets me undo one", async () => {
     const app = createApp(openDb(":memory:"), () => new Date(2026, 10, 19, 12, 0, 0));

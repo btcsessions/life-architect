@@ -246,3 +246,4 @@ textarea.tall { min-height: 180px; }
 .pdf-rows td { padding: 6px 10px; border-bottom: 1px solid var(--separator); overflow-wrap: anywhere; }
 .pdf-rows td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .pdf-rows td:first-child { white-space: nowrap; }
+.chip-x { background: none; border: 0; color: var(--label-2); padding: 0 0 0 6px; min-width: 28px; min-height: 28px; }

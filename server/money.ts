@@ -189,6 +189,35 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     return made;
   }
 
+  // His own transaction types, on top of the built-in ones. Income, Transfers and Other stay last.
+  db.exec("CREATE TABLE IF NOT EXISTS money_cats (name TEXT PRIMARY KEY COLLATE NOCASE, created_at TEXT NOT NULL)");
+  const custom = () => (db.prepare("SELECT name FROM money_cats ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+  const cats = () => [...CATEGORIES.slice(0, -3), ...custom(), ...CATEGORIES.slice(-3)];
+  app.get("/api/money/categories", (c) => c.json({ categories: cats(), custom: custom() }));
+  app.post("/api/money/categories", async (c) => {
+    const name = String(((await c.req.json().catch(() => ({}))) as any).name ?? "").replace(/\s+/g, " ").trim().slice(0, 30);
+    if (!name) return c.json({ error: "Give the type a name." }, 400);
+    if (cats().some((x) => x.toLowerCase() === name.toLowerCase())) return c.json({ error: "That type already exists." }, 409);
+    if (custom().length >= 40) return c.json({ error: "That's a lot of types. Remove one first." }, 400);
+    db.prepare("INSERT INTO money_cats (name, created_at) VALUES (?, ?)").run(name, ctx.now().toISOString());
+    return c.json({ categories: cats(), custom: custom() });
+  });
+  // Rename one of his types everywhere, or remove it (its transactions go back to Other).
+  app.patch("/api/money/categories/:name", async (c) => {
+    const old = custom().find((x) => x.toLowerCase() === c.req.param("name").toLowerCase());
+    const to = String(((await c.req.json().catch(() => ({}))) as any).to ?? "").replace(/\s+/g, " ").trim().slice(0, 30);
+    if (!old) return c.json({ error: "Only types you added can be renamed." }, 404);
+    if (!to || cats().some((x) => x.toLowerCase() === to.toLowerCase() && x !== old)) return c.json({ error: "Pick a name that isn't in use." }, 400);
+    db.transaction(() => { for (const t of ["money_tx", "money_rules"]) db.prepare(`UPDATE ${t} SET category = ? WHERE category = ?`).run(to, old); db.prepare("UPDATE money_cats SET name = ? WHERE name = ?").run(to, old); })();
+    return c.json({ categories: cats(), custom: custom() });
+  });
+  app.delete("/api/money/categories/:name", (c) => {
+    const old = custom().find((x) => x.toLowerCase() === c.req.param("name").toLowerCase());
+    if (!old) return c.json({ error: "Only types you added can be removed." }, 404);
+    db.transaction(() => { db.prepare("UPDATE money_tx SET category = 'Other' WHERE category = ?").run(old); db.prepare("DELETE FROM money_rules WHERE category = ?").run(old); db.prepare("DELETE FROM money_cats WHERE name = ?").run(old); })();
+    return c.json({ categories: cats(), custom: custom() });
+  });
+
   // Go back over everything already imported and pair up transfers.
   app.post("/api/money/transfers/sweep", (c) => {
     const pairs = linkTransfers();
@@ -392,7 +421,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     const other = db.prepare("SELECT account, day FROM money_tx WHERE id = ?");
     const tx = inMonth(month).filter((t) => (!cat || t.category === cat) && (!merchant || t.merchant === merchant))
       .map((t: any) => ({ ...t, pair: t.pair_id ? other.get(t.pair_id) ?? null : null }));
-    return c.json({ categories: CATEGORIES, accounts: accounts(), tx });
+    return c.json({ categories: cats(), custom: custom(), accounts: accounts(), tx });
   });
 
   const accounts = () => (db.prepare("SELECT account, count(*) AS n, min(day) AS first, max(day) AS last FROM money_tx WHERE account IS NOT NULL GROUP BY account ORDER BY account").all() as Array<{ account: string }>);
@@ -405,7 +434,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     if (typeof b.note === "string") db.prepare("UPDATE money_tx SET note = ? WHERE id = ?").run(b.note.trim().slice(0, 300) || null, id);
     if (b.category === undefined && typeof b.note === "string") return c.json({ ok: true });
-    if (!CATEGORIES.includes(b.category as string)) return c.json({ error: "Pick a category." }, 400);
+    if (!cats().includes(b.category as string)) return c.json({ error: "Pick a category." }, 400);
     // His choice sticks: automatic matching won't change it back, and a wrongly matched pair is split.
     db.prepare("UPDATE money_tx SET keep_cat = 1 WHERE id = ?").run(id);
     const pair = (t as any).pair_id as number | null;
@@ -437,14 +466,14 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     if (!merchants.length) return c.json({ sorted: 0 });
     try {
       const answer = await chat(cfg, [
-        { role: "system", content: `Sort each merchant name into one of: ${CATEGORIES.filter((x) => x !== "Other").join(", ")}, or "Other" if you can't tell. Reply with ONLY a JSON object mapping each name exactly as given to its category.` },
+        { role: "system", content: `Sort each merchant name into one of: ${cats().filter((x) => x !== "Other").join(", ")}, or "Other" if you can't tell. Reply with ONLY a JSON object mapping each name exactly as given to its category.` },
         { role: "user", content: JSON.stringify(merchants) },
       ]);
       const map = extractJson(answer) as Record<string, unknown>;
       let sorted = 0;
       for (const m of merchants) {
         const cat = map?.[m];
-        if (typeof cat === "string" && CATEGORIES.includes(cat) && cat !== "Other") {
+        if (typeof cat === "string" && cats().includes(cat) && cat !== "Other") {
           db.prepare("INSERT INTO money_rules (merchant, category) VALUES (?, ?) ON CONFLICT(merchant) DO UPDATE SET category = excluded.category").run(m.toLowerCase(), cat);
           sorted += db.prepare("UPDATE money_tx SET category = ? WHERE merchant = ? AND category = 'Other'").run(cat, m).changes;
         }

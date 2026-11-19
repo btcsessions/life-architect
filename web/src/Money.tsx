@@ -15,7 +15,7 @@ interface Tx { id: number; day: string; description: string; merchant: string; a
 interface Asset { id: number; name: string; kind: string; value: number; updated_at: string }
 type Props = { onBack: () => void; onError: (m: string) => void };
 
-const COLORS = ["#f7931a", "#7ed3f2", "#7ef2a8", "#3fa8d4", "#ffb35c", "#b8bdcc", "#c46f0a", "#8a90a3"];
+const COLORS = ["#f7931a", "#7ed3f2", "#7ef2a8", "#3fa8d4", "#ffb35c", "#b8bdcc", "#c46f0a", "#8a90a3", "#e879a6", "#a78bfa", "#f2e27e", "#4fd1b5", "#ff6b5e", "#9fb4ff", "#d4a373", "#6ee7f0"];
 const monthName = (m: string) => new Date(m + "-15T12:00:00").toLocaleDateString("en", { month: "long", year: "numeric" });
 const change = (now: number, before: number) => (before ? `${now >= before ? "+" : "−"}${Math.abs(Math.round(((now - before) / before) * 100))}% vs ${""}` : "");
 
@@ -162,8 +162,10 @@ function Dig({ title, total, open, onToggle, children }: { title: string; total:
 }
 
 function Transactions({ s, month, category, onChanged, onError }: { s: Session; month: string; category: string | null; onChanged: () => void; onError: (m: string) => void }) {
-  const [data, setData] = useState<{ tx: Tx[]; categories: string[] } | null>(null);
-  const load = useCallback(() => s.call<{ tx: Tx[]; categories: string[] }>(`/api/money/tx?month=${month}${category ? `&category=${encodeURIComponent(category)}` : ""}`).then(setData).catch((e) => onError(e.message)), [s, month, category, onError]);
+  const [data, setData] = useState<{ tx: Tx[]; categories: string[]; custom: string[] } | null>(null);
+  const [type, setType] = useState("");
+  const [types, setTypes] = useState(false);
+  const load = useCallback(() => s.call<{ tx: Tx[]; categories: string[]; custom: string[] }>(`/api/money/tx?month=${month}${category ? `&category=${encodeURIComponent(category)}` : ""}`).then(setData).catch((e) => onError(e.message)), [s, month, category, onError]);
   useEffect(() => { load(); }, [load]);
   if (!data) return <p className="muted">Loading…</p>;
   const resort = async (t: Tx, cat: string) => {
@@ -175,6 +177,18 @@ function Transactions({ s, month, category, onChanged, onError }: { s: Session; 
   const saveLabel = async (t: Tx) => { try { await s.call(`/api/money/tx/${t.id}`, json("PATCH", { note: label })); setLabelling(null); await load(); } catch (e) { onError((e as Error).message); } };
   return (
     <>
+      <button className="linkish" aria-expanded={types} onClick={() => setTypes(!types)}>Your own transaction types · {data.custom.length} {types ? "▾" : "▸"}</button>
+      {types && (
+        <div className="card pad form">
+          <form className="row" onSubmit={(e) => { e.preventDefault(); s.call("/api/money/categories", json("POST", { name: type })).then(() => { setType(""); return load(); }).catch((er) => onError(er.message)); }}>
+            <label htmlFor="newtype" className="sr">New type</label>
+            <input id="newtype" className="plain-input grow" type="text" maxLength={30} placeholder="e.g. Kids, Gear, Software, Taxes" value={type} onChange={(e) => setType(e.target.value)} />
+            <button className="btn" type="submit" disabled={!type.trim()}>Add type</button>
+          </form>
+          {data.custom.length > 0 && <div className="row">{data.custom.map((c) => <span key={c} className="status">{c} <button className="chip-x" aria-label={`Remove ${c}`} onClick={() => s.call(`/api/money/categories/${encodeURIComponent(c)}`, { method: "DELETE" }).then(() => { load(); onChanged(); }).catch((er) => onError(er.message))}>✕</button></span>)}</div>}
+          <p className="muted small" style={{ margin: 0 }}>New types show in the list beside every transaction and get their own slice of the chart. Removing one sends its transactions back to Other.</p>
+        </div>
+      )}
       {category && <p className="muted small">Showing {category} only. Close the category above to see everything.</p>}
       <ul className="list">
         {data.tx.map((t) => (
