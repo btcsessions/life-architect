@@ -549,20 +549,104 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     }
   });
 
-  app.get("/api/money/assets", (c) => c.json({ assets: db.prepare("SELECT * FROM money_assets ORDER BY value DESC").all() }));
+  // ---- What you own: stocks by ticker, property with what's still owing, and anything else by hand.
+  for (const [col, type] of [["owing", "REAL NOT NULL DEFAULT 0"], ["ticker", "TEXT"], ["shares", "REAL"], ["currency", "TEXT"], ["price", "REAL"], ["price_day", "TEXT"], ["fx", "REAL"]] as const)
+    if (!(db.prepare("PRAGMA table_info(money_assets)").all() as Array<{ name: string }>).some((c) => c.name === col)) db.exec(`ALTER TABLE money_assets ADD COLUMN ${col} ${type}`);
+  const num = (v: unknown) => (v === null || v === undefined || v === "" ? null : parseAmount(String(v)));
+  const guessCurrency = (ticker: string) => (/\.(TRT|TO|TRV|V|NE|CN)$/i.test(ticker) ? "CAD" : "USD");
+  const quoteKey = () => ctx.secret.get("stock_key") ?? "";
+  const av = async (params: string) => {
+    const r = await fetch(`https://www.alphavantage.co/query?${params}&apikey=${encodeURIComponent(quoteKey())}`, { signal: AbortSignal.timeout(30_000) });
+    const j = (await r.json()) as Record<string, any>;
+    if (j.Note || j.Information) throw new Error("limit");
+    return j;
+  };
+  let refreshing: Promise<{ updated: number; failed: string[]; limited: boolean }> | null = null;
+  /** Fetch the latest price for each ticker and re-value the holdings in CAD. Only ticker symbols are sent. */
+  async function refreshQuotes(force = false) {
+    const out = { updated: 0, failed: [] as string[], limited: false };
+    const stocks = db.prepare("SELECT * FROM money_assets WHERE ticker IS NOT NULL").all() as any[];
+    if (!quoteKey() || !stocks.length) return out;
+    const due = [...new Set(stocks.filter((a) => force || a.price_day !== ctx.day()).map((a) => a.ticker as string))];
+    let usdcad: number | null = null;
+    try {
+      if (due.length && stocks.some((a) => a.currency === "USD")) {
+        const fx = await av("function=CURRENCY_EXCHANGE_RATE&from_currency=USD&to_currency=CAD");
+        const rate = Number(Object.entries(fx["Realtime Currency Exchange Rate"] ?? {}).find(([k]) => /exchange rate/i.test(k))?.[1]);
+        if (rate > 0) usdcad = rate;
+      }
+      for (const t of due) {
+        const q = (await av(`function=GLOBAL_QUOTE&symbol=${encodeURIComponent(t)}`))["Global Quote"] ?? {};
+        const price = Number(Object.entries(q).find(([k]) => /price/i.test(k))?.[1]);
+        if (!(price > 0)) { out.failed.push(t); continue; }
+        for (const a of stocks.filter((x) => x.ticker === t)) {
+          const fx = a.currency === "USD" ? usdcad ?? a.fx ?? null : 1;
+          if (!fx) { out.failed.push(t); continue; }
+          db.prepare("UPDATE money_assets SET price = ?, fx = ?, price_day = ?, value = ?, updated_at = ? WHERE id = ?").run(price, fx, ctx.day(), Math.round(a.shares * price * fx * 100) / 100, ctx.day(), a.id);
+          out.updated++;
+        }
+      }
+    } catch (e) { if ((e as Error).message === "limit") out.limited = true; else out.failed.push("the price service couldn't be reached"); }
+    return out;
+  }
+  const assetView = () => {
+    const assets = (db.prepare("SELECT * FROM money_assets ORDER BY (value - owing) DESC").all() as any[]).map((a) => ({ ...a, equity: Math.round((a.value - a.owing) * 100) / 100 }));
+    // Bitcoin wallets count too, at the last price seen.
+    const sats = (db.prepare("SELECT coalesce(sum(net), 0) AS s FROM btc_tx").get() as { s: number }).s;
+    const px = Number((db.prepare("SELECT value FROM btc_config WHERE key = 'last_price'").get() as { value: string } | undefined)?.value) || null;
+    const bitcoin = sats && px ? Math.round((sats / 1e8) * px * 100) / 100 : null;
+    const value = assets.reduce((t, a) => t + a.value, 0) + (bitcoin ?? 0), owing = assets.reduce((t, a) => t + a.owing, 0);
+    return { assets, bitcoin, totals: { value: Math.round(value * 100) / 100, owing: Math.round(owing * 100) / 100, net: Math.round((value - owing) * 100) / 100 }, has_key: Boolean(quoteKey()), today: ctx.day() };
+  };
+  app.get("/api/money/assets", (c) => {
+    // Prices are refreshed once a day in the background; the page shows what's stored meanwhile.
+    if (quoteKey() && !refreshing && db.prepare("SELECT 1 FROM money_assets WHERE ticker IS NOT NULL AND (price_day IS NULL OR price_day != ?)").get(ctx.day()) && !process.env.VITEST) refreshing = refreshQuotes().finally(() => { refreshing = null; });
+    return c.json(assetView());
+  });
+  app.put("/api/money/assets/quote-key", async (c) => {
+    ctx.secret.set("stock_key", String(((await c.req.json().catch(() => ({}))) as any).key ?? "").trim().slice(0, 100));
+    return c.json({ has_key: Boolean(quoteKey()) });
+  });
+  app.post("/api/money/assets/refresh", async (c) => {
+    if (!quoteKey()) return c.json({ error: "Add a price key first." }, 400);
+    const r = await refreshQuotes(true);
+    return c.json({ ...r, ...assetView() });
+  });
   app.post("/api/money/assets", async (c) => {
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const value = parseAmount(String(b.value ?? ""));
+    if (typeof b.ticker === "string" && b.ticker.trim()) {
+      const ticker = b.ticker.trim().toUpperCase().slice(0, 20), shares = num(b.shares), price = num(b.price);
+      if (!/^[A-Z0-9.\-=^]+$/.test(ticker)) return c.json({ error: "That doesn't look like a ticker symbol." }, 400);
+      if (!shares || shares <= 0) return c.json({ error: "Enter how many shares." }, 400);
+      const currency = b.currency === "CAD" || b.currency === "USD" ? b.currency : guessCurrency(ticker);
+      const fx = currency === "CAD" ? 1 : num(b.fx) ?? 1.4;
+      db.prepare("INSERT INTO money_assets (name, kind, value, updated_at, ticker, shares, currency, price, fx) VALUES (?, 'Stock', ?, ?, ?, ?, ?, ?, ?)")
+        .run((typeof b.name === "string" && b.name.trim() ? b.name.trim() : ticker).slice(0, 80), price ? Math.round(shares * price * fx * 100) / 100 : 0, ctx.day(), ticker, shares, currency, price, fx);
+      const got = quoteKey() ? await refreshQuotes() : null;
+      return c.json({ ok: true, priced: Boolean(price) || Boolean(got?.updated), limited: got?.limited ?? false, failed: got?.failed ?? [] });
+    }
+    const value = num(b.value), owing = num(b.owing) ?? 0;
     if (typeof b.name !== "string" || !b.name.trim()) return c.json({ error: "Give it a name." }, 400);
-    if (value === null) return c.json({ error: "Enter what it's worth." }, 400);
-    db.prepare("INSERT INTO money_assets (name, kind, value, updated_at) VALUES (?, ?, ?, ?)").run(b.name.trim().slice(0, 80), String(b.kind || "Other").slice(0, 40), value, ctx.day());
+    if (value === null || value < 0) return c.json({ error: "Enter what it's worth." }, 400);
+    if (owing < 0) return c.json({ error: "What's owing can't be negative." }, 400);
+    db.prepare("INSERT INTO money_assets (name, kind, value, owing, updated_at) VALUES (?, ?, ?, ?, ?)").run(b.name.trim().slice(0, 80), String(b.kind || "Other").slice(0, 40), value, owing, ctx.day());
     return c.json({ ok: true });
   });
   app.patch("/api/money/assets/:id", async (c) => {
+    const a = db.prepare("SELECT * FROM money_assets WHERE id = ?").get(Number(c.req.param("id"))) as any;
+    if (!a) return c.json({ error: "No such entry." }, 404);
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const value = parseAmount(String(b.value ?? ""));
-    if (value === null) return c.json({ error: "Enter what it's worth." }, 400);
-    return db.prepare("UPDATE money_assets SET value = ?, updated_at = ? WHERE id = ?").run(value, ctx.day(), Number(c.req.param("id"))).changes ? c.json({ ok: true }) : c.json({ error: "No such entry." }, 404);
+    const value = "value" in b ? num(b.value) : a.value, owing = "owing" in b ? num(b.owing) ?? 0 : a.owing;
+    const shares = "shares" in b ? num(b.shares) : a.shares, price = "price" in b ? num(b.price) : a.price;
+    if (a.ticker) {
+      if (!shares || shares <= 0) return c.json({ error: "Enter how many shares." }, 400);
+      db.prepare("UPDATE money_assets SET shares = ?, price = ?, value = ?, updated_at = ?, price_day = CASE WHEN ? THEN ? ELSE price_day END WHERE id = ?")
+        .run(shares, price, price ? Math.round(shares * price * (a.fx ?? 1) * 100) / 100 : 0, ctx.day(), "price" in b ? 1 : 0, ctx.day(), a.id);
+    } else {
+      if (value === null || value < 0 || owing < 0) return c.json({ error: "Enter what it's worth and what's owing." }, 400);
+      db.prepare("UPDATE money_assets SET value = ?, owing = ?, updated_at = ? WHERE id = ?").run(value, owing, ctx.day(), a.id);
+    }
+    return c.json({ ok: true });
   });
   app.delete("/api/money/assets/:id", (c) => (db.prepare("DELETE FROM money_assets WHERE id = ?").run(Number(c.req.param("id"))).changes ? c.json({ ok: true }) : c.json({ error: "No such entry." }, 404)));
   const wallets = mountBtc(app, ctx, linkTransfers);

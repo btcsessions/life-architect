@@ -192,6 +192,56 @@ describe("my own transaction types", () => {
   });
 });
 
+describe("what I own", () => {
+  it("values stocks by ticker in CAD, shows home equity after what's owing, and totals it", async () => {
+    const asked: string[] = [];
+    let limited = false;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      asked.push(url);
+      const u = new URL(url), fn = u.searchParams.get("function"), sym = u.searchParams.get("symbol");
+      let body: unknown = {};
+      if (limited) body = { Information: "rate limit" };
+      else if (fn === "CURRENCY_EXCHANGE_RATE") body = { "Realtime Currency Exchange Rate": { "5. Exchange Rate": "1.4000" } };
+      else if (fn === "GLOBAL_QUOTE") body = { "Global Quote": sym === "AAPL" ? { "01. symbol": "AAPL", "05. price": "200.0000" } : sym === "SHOP.TRT" ? { "05. price": "150.50" } : {} };
+      return new Response(JSON.stringify(body), { status: 200 });
+    }));
+    const app = createApp(openDb(":memory:"), () => new Date(2026, 10, 19, 12, 0, 0));
+    const cookie = (await app.request("/api/money/pin", { method: "POST", headers: J, body: JSON.stringify({ pin: "246810" }) })).headers.get("set-cookie")!.split(";")[0];
+    const call = async (method: string, path: string, body?: unknown) => app.request(path, { method, headers: { ...J, cookie }, body: body === undefined ? undefined : JSON.stringify(body) });
+    // Without a key: added, priced by hand or not at all, nothing fetched.
+    expect(await (await call("POST", "/api/money/assets", { ticker: "aapl", shares: "10" })).json()).toMatchObject({ priced: false });
+    expect(asked).toHaveLength(0);
+    await call("PUT", "/api/money/assets/quote-key", { key: "KEY123" });
+    await call("POST", "/api/money/assets", { ticker: "SHOP.TRT", shares: 4 });
+    expect((await call("POST", "/api/money/assets", { ticker: "NOPE", shares: 1 })).status).toBe(200);
+    await call("POST", "/api/money/assets", { name: "Home", kind: "Property", value: "650,000", owing: "410,000" });
+    expect((await call("POST", "/api/money/assets", { ticker: "AAPL", shares: 0 })).status).toBe(400);
+    let v = await (await call("GET", "/api/money/assets")).json();
+    const by = (n: string) => v.assets.find((a: any) => a.name === n);
+    expect(by("AAPL")).toMatchObject({ value: 2800, currency: "USD", price: 200 }); // 10 x 200 x 1.40
+    expect(by("SHOP.TRT")).toMatchObject({ value: 602, currency: "CAD" });
+    expect(by("NOPE")).toMatchObject({ value: 0, price: null });
+    expect(by("Home")).toMatchObject({ value: 650000, owing: 410000, equity: 240000 });
+    expect(v.totals).toEqual({ value: 653402, owing: 410000, net: 243402 });
+    expect(JSON.stringify(v)).not.toContain("KEY123");
+    // Only tickers went out: never share counts or values.
+    expect(asked.every((u) => u.startsWith("https://www.alphavantage.co/query?") && !/shares|2800|650000/.test(u))).toBe(true);
+    // Paying the mortgage down and changing a holding.
+    await call("PATCH", `/api/money/assets/${by("Home").id}`, { value: 650000, owing: 400000 });
+    await call("PATCH", `/api/money/assets/${by("AAPL").id}`, { shares: 20 });
+    await call("PATCH", `/api/money/assets/${by("NOPE").id}`, { shares: 1, price: 12.5 });
+    v = await (await call("GET", "/api/money/assets")).json();
+    expect(by("Home").equity).toBe(250000);
+    expect(by("AAPL").value).toBe(5600);
+    expect(by("NOPE").value).toBe(17.5); // typed in by hand, in USD at the stored rate
+    // When the service says slow down, what's stored is kept and he's told.
+    limited = true;
+    const r = await (await call("POST", "/api/money/assets/refresh")).json();
+    expect(r).toMatchObject({ limited: true, updated: 0 });
+    expect(r.assets.find((a: any) => a.name === "AAPL").value).toBe(5600);
+  });
+});
+
 describe("transfers between my own accounts", () => {
   it("pairs a chequing-to-savings move and a card payment, leaves look-alikes alone, and lets me undo one", async () => {
     const app = createApp(openDb(":memory:"), () => new Date(2026, 10, 19, 12, 0, 0));
