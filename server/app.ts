@@ -2,13 +2,28 @@ import { Hono } from "hono";
 import type { Db, Task, Area } from "./db.ts";
 import { today } from "./db.ts";
 import { rank } from "./rank.ts";
-import { fileCapture, modelFromEnv, type Filed } from "./file.ts";
+import { fileCapture, type Filed, type ModelConfig } from "./file.ts";
+
+/** Settings the user can change in the app. Each falls back to the environment variable of the same name. */
+const SETTING_KEYS = ["llm_url", "llm_key", "llm_model", "stt_url", "stt_key", "stt_model"] as const;
+type SettingKey = (typeof SETTING_KEYS)[number];
+const SECRET: SettingKey[] = ["llm_key", "stt_key"];
 
 const EDITABLE = ["title", "note", "importance", "due", "minutes", "delegate", "area_id", "snoozed_until"] as const;
 
 export function createApp(db: Db, now: () => Date = () => new Date()) {
   const app = new Hono();
   const day = () => today(now());
+
+  const setting = (k: SettingKey): string => {
+    const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(k) as { value: string } | undefined;
+    return (row?.value ?? process.env[k.toUpperCase()] ?? "").trim();
+  };
+  const model = (): ModelConfig | null => {
+    const url = setting("llm_url").replace(/\/$/, "");
+    const name = setting("llm_model");
+    return url && name ? { url, model: name, key: setting("llm_key") || undefined } : null;
+  };
 
   const areas = () => db.prepare("SELECT * FROM areas ORDER BY sort").all() as Area[];
   const openTasks = () => db.prepare("SELECT * FROM tasks WHERE status = 'open' ORDER BY id").all() as Task[];
@@ -25,8 +40,52 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
   }
 
   app.get("/api/config", (c) =>
-    c.json({ model: modelFromEnv()?.model ?? null, stt: Boolean(process.env.STT_URL) }),
+    c.json({ model: model()?.model ?? null, stt: Boolean(setting("stt_url")) }),
   );
+
+  // Keys are write-only: the app can tell whether one is saved, never read it back.
+  const settingsView = () =>
+    Object.fromEntries(SETTING_KEYS.map((k) => (SECRET.includes(k) ? [`${k}_set`, Boolean(setting(k))] : [k, setting(k)])));
+
+  app.get("/api/settings", (c) => c.json(settingsView()));
+
+  app.put("/api/settings", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return c.json({ error: "Nothing to save." }, 400);
+    for (const k of SETTING_KEYS) {
+      if (!(k in body)) continue;
+      const v = body[k];
+      if (typeof v !== "string" || v.length > 2000) return c.json({ error: `"${k}" must be text.` }, 400);
+      if (k.endsWith("_url") && v.trim() && !/^https?:\/\/\S+$/.test(v.trim()))
+        return c.json({ error: "An address starts with http:// or https://" }, 400);
+      db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v.trim());
+    }
+    return c.json(settingsView());
+  });
+
+  // One tiny request, so a wrong address or key is found here and not on the next quick-add.
+  app.post("/api/settings/test", async (c) => {
+    const m = model();
+    if (!m) return c.json({ ok: false, message: "Enter an address and a model name first." });
+    try {
+      const res = await fetch(`${m.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(m.key ? { authorization: `Bearer ${m.key}` } : {}) },
+        body: JSON.stringify({ model: m.model, messages: [{ role: "user", content: "Reply with the single word: ready" }] }),
+        signal: AbortSignal.timeout(45_000),
+      });
+      if (res.status === 401 || res.status === 403) return c.json({ ok: false, message: "It answered, but refused the key." });
+      if (res.status === 404) return c.json({ ok: false, message: "Reached the server, but not at that address. It usually ends in /v1." });
+      if (!res.ok) return c.json({ ok: false, message: `It answered with an error (${res.status}): ${(await res.text()).slice(0, 200)}` });
+      const body: any = await res.json().catch(() => null);
+      const reply = body?.choices?.[0]?.message?.content;
+      if (typeof reply !== "string") return c.json({ ok: false, message: "It answered, but not in the expected format." });
+      return c.json({ ok: true, message: `Connected. It replied: "${reply.trim().slice(0, 80)}"` });
+    } catch (err) {
+      const e = err as Error;
+      return c.json({ ok: false, message: e.name === "TimeoutError" ? "No answer within 45 seconds." : `Couldn't reach it: ${e.message}.` });
+    }
+  });
 
   // Everything the deck needs in one call.
   app.get("/api/deck", (c) => {
@@ -72,7 +131,7 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
     if (!text) return c.json({ error: "Nothing to add: the text was empty." }, 400);
     if (text.length > 8000) return c.json({ error: "That's too long for one quick-add (8,000 characters max)." }, 400);
     const source = typeof body?.source === "string" ? body.source.slice(0, 40) : "app";
-    const { items, via } = await fileCapture(text, day());
+    const { items, via } = await fileCapture(text, day(), model());
     db.prepare("INSERT INTO captures (text, source, via, created_at) VALUES (?, ?, ?, ?)").run(
       text, source, via, now().toISOString(),
     );
@@ -120,18 +179,18 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
 
   // Voice: the browser records, this forwards the audio to a speech-to-text service you run.
   app.post("/api/transcribe", async (c) => {
-    const stt = process.env.STT_URL;
-    if (!stt) return c.json({ error: "Speech-to-text isn't set up yet (STT_URL)." }, 501);
+    const stt = setting("stt_url");
+    if (!stt) return c.json({ error: "Speech-to-text isn't set up yet. Add it in Settings." }, 501);
     const form = await c.req.formData().catch(() => null);
     const audio = form?.get("audio");
     if (!(audio instanceof File)) return c.json({ error: "No audio received." }, 400);
     const out = new FormData();
     out.set("file", audio, audio.name || "note.webm");
-    out.set("model", process.env.STT_MODEL ?? "whisper-1");
+    out.set("model", setting("stt_model") || "whisper-1");
     try {
       const res = await fetch(`${stt.replace(/\/$/, "")}/audio/transcriptions`, {
         method: "POST",
-        headers: process.env.STT_KEY ? { authorization: `Bearer ${process.env.STT_KEY}` } : {},
+        headers: setting("stt_key") ? { authorization: `Bearer ${setting("stt_key")}` } : {},
         body: out,
         signal: AbortSignal.timeout(60_000),
       });

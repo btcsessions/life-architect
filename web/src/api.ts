@@ -16,6 +16,10 @@ export interface AreaView { id: string; name: string; locked: boolean; need: num
 export interface NextItem { id: number; area_id: string; title: string; locked: boolean; why: string[] }
 export interface Deck { today: string; next: NextItem[]; areas: AreaView[]; addedToday: number }
 export interface Config { model: string | null; stt: boolean }
+export interface Settings {
+  llm_url: string; llm_model: string; llm_key_set: boolean;
+  stt_url: string; stt_model: string; stt_key_set: boolean;
+}
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
@@ -38,6 +42,9 @@ export const api = {
   capture: (text: string) => call<{ via: string; created: Task[] }>("/api/capture", json("POST", { text })),
   patch: (id: number, body: Record<string, unknown>) => call<Task>(`/api/tasks/${id}`, json("PATCH", body)),
   remove: (id: number) => call<{ ok: true }>(`/api/tasks/${id}`, { method: "DELETE" }),
+  settings: () => call<Settings>("/api/settings"),
+  saveSettings: (body: Record<string, string>) => call<Settings>("/api/settings", json("PUT", body)),
+  testModel: () => call<{ ok: boolean; message: string }>("/api/settings/test", { method: "POST" }),
   transcribe: (audio: Blob) => {
     const form = new FormData();
     form.set("audio", audio, "note.webm");

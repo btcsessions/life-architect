@@ -12,6 +12,8 @@ This is **Phase 1** of the build plan: the deck and quick-add.
 - **Quick-add**: type (or speak, once speech-to-text is set up) something like
   *"Finish the YubiKey outline by Thursday, important, 90 minutes. Ask Nathan to redo the thumbnail."*
   It is split into tasks and filed. Links you include are kept on the task.
+- **Settings** (top right): enter the address, model name and key for the model that files quick-adds, and for
+  speech-to-text. Keys are saved on the Umbrel and never shown again. "Save and test" checks the connection.
 - **People** is a sealed placeholder: the deck never shows its task text, and quick-add never files into it.
 
 ## Not built yet

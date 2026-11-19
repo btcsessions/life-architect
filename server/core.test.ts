@@ -138,6 +138,31 @@ describe("api", () => {
     expect(deck.next.find((n: any) => n.locked)).toMatchObject({ title: "People: something due", why: [] });
   });
 
+  it("saves settings, never returns keys, and uses the saved model for filing", async () => {
+    const app = make();
+    expect((await post(app, "/api/settings", { llm_url: "ftp://x" }, "PUT")).status).toBe(400);
+    const saved = await (await post(app, "/api/settings", { llm_url: "http://model/v1/", llm_model: "m", llm_key: "secret" }, "PUT")).json();
+    expect(saved).toMatchObject({ llm_url: "http://model/v1/", llm_model: "m", llm_key_set: true, stt_key_set: false });
+    expect(JSON.stringify(saved)).not.toContain("secret");
+    expect((await (await app.request("/api/config")).json()).model).toBe("m");
+
+    const real = globalThis.fetch;
+    const seen: any[] = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      seen.push([String(url), init.headers.authorization]);
+      return new Response(JSON.stringify({ choices: [{ message: { content: '[{"area":"health","title":"Book physio","importance":2}]' } }] }));
+    }) as typeof fetch;
+    try {
+      const cap = await (await post(app, "/api/capture", { text: "book physio" })).json();
+      expect(cap.via).toBe("model");
+      expect(cap.created[0].area_id).toBe("health");
+      expect(seen[0]).toEqual(["http://model/v1/chat/completions", "Bearer secret"]);
+      expect(await (await app.request("/api/settings/test", { method: "POST" })).json()).toMatchObject({ ok: true });
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it("rejects bad input with a plain message", async () => {
     const app = make();
     expect((await post(app, "/api/capture", { text: "  " })).status).toBe(400);

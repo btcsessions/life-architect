@@ -70,6 +70,7 @@ export function openDb(path = process.env.LA_DB ?? "data/life.db") {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       text TEXT NOT NULL, source TEXT NOT NULL, via TEXT NOT NULL, created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS tasks_open ON tasks(status, area_id);
   `);
   const seed = db.prepare("INSERT OR IGNORE INTO areas (id, name, sort, locked) VALUES (?, ?, ?, ?)");

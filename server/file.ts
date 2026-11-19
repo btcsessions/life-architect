@@ -184,7 +184,7 @@ export async function fileCapture(
             { role: "user", content: text },
           ],
         }),
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(45_000),
       });
       if (!res.ok) throw new Error(`model ${res.status}`);
       const body: any = await res.json();

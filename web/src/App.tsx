@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, dueLabel, type AreaView, type Config, type Deck, type Task } from "./api";
+import { api, dueLabel, type AreaView, type Config, type Deck, type Settings, type Task } from "./api";
 
 const ICONS: Record<string, string> = {
   work: "M4 4h12a2 2 0 012 2v7a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zM8.5 7.5v4l3.5-2z",
@@ -37,6 +37,7 @@ export function App() {
   const [open, setOpen] = useState<string | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
   const [filed, setFiled] = useState<Task[] | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -73,8 +74,14 @@ export function App() {
           <span className="wordmark">Life <span className="accent">Architect</span></span>
           <span className="eyebrow">{dateLine}</span>
         </div>
-        <span className="chip">{config?.model ? `Model: ${config.model}` : "Filing by rules · no model set"}</span>
+        <button className="chip" aria-expanded={showSettings} onClick={() => setShowSettings(!showSettings)}>
+          {config?.model ? `Model: ${config.model}` : "No model set"} · Settings
+        </button>
       </header>
+
+      {showSettings && (
+        <SettingsPanel onClose={() => setShowSettings(false)} onSaved={() => api.config().then(setConfig).catch(() => {})} />
+      )}
 
       {error && (
         <div className="notice" role="alert">
@@ -134,6 +141,85 @@ export function App() {
         onFiled={async (tasks) => { setFiled(tasks); await load(); }}
       />
     </div>
+  );
+}
+
+function SettingsPanel({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [s, setS] = useState<Settings | null>(null);
+  const [form, setForm] = useState<Record<string, string>>({});
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.settings().then(setS).catch((e) => setMsg({ ok: false, text: (e as Error).message }));
+  }, []);
+
+  const set = (k: string) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const save = async (thenTest: boolean) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      setS(await api.saveSettings(form));
+      setForm({});
+      onSaved();
+      if (thenTest) {
+        const r = await api.testModel();
+        setMsg({ ok: r.ok, text: r.message });
+      } else setMsg({ ok: true, text: "Saved." });
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!s) return <section className="card settings"><p className="muted">{msg?.text ?? "Loading settings…"}</p></section>;
+  const val = (k: keyof Settings) => form[k] ?? String(s[k] ?? "");
+  return (
+    <section className="card settings" aria-label="Settings">
+      <div className="settings-head">
+        <h2 className="module-name">Settings</h2>
+        <button className="btn ghost" onClick={onClose}>Close</button>
+      </div>
+
+      <fieldset>
+        <legend className="eyebrow">Model that files your quick-adds</legend>
+        <p className="muted small">Any OpenAI-style address, such as Hermes on this Umbrel. Leave empty to file by simple rules.</p>
+        <div className="fields">
+          <label htmlFor="llm_url">Address
+            <input id="llm_url" type="url" inputMode="url" placeholder="http://…:8642/v1" value={val("llm_url")} onChange={set("llm_url")} />
+          </label>
+          <label htmlFor="llm_model">Model name
+            <input id="llm_model" type="text" autoCapitalize="off" value={val("llm_model")} onChange={set("llm_model")} />
+          </label>
+          <label htmlFor="llm_key">Key
+            <input id="llm_key" type="password" autoComplete="off" placeholder={s.llm_key_set ? "Saved. Type to replace" : "None saved"} value={form.llm_key ?? ""} onChange={set("llm_key")} />
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend className="eyebrow">Speech-to-text for the mic</legend>
+        <p className="muted small">A Whisper-style service. The mic stays off until this is set.</p>
+        <div className="fields">
+          <label htmlFor="stt_url">Address
+            <input id="stt_url" type="url" inputMode="url" placeholder="http://…/v1" value={val("stt_url")} onChange={set("stt_url")} />
+          </label>
+          <label htmlFor="stt_model">Model name
+            <input id="stt_model" type="text" autoCapitalize="off" placeholder="whisper-1" value={val("stt_model")} onChange={set("stt_model")} />
+          </label>
+          <label htmlFor="stt_key">Key
+            <input id="stt_key" type="password" autoComplete="off" placeholder={s.stt_key_set ? "Saved. Type to replace" : "None saved"} value={form.stt_key ?? ""} onChange={set("stt_key")} />
+          </label>
+        </div>
+      </fieldset>
+
+      {msg && <p className={msg.ok ? "small electro" : "small accent"} role="status">{msg.text}</p>}
+      <div className="row">
+        <button className="btn" disabled={busy} onClick={() => save(true)}>{busy ? "Working…" : "Save and test the model"}</button>
+        <button className="btn ghost" disabled={busy} onClick={() => save(false)}>Save only</button>
+      </div>
+    </section>
   );
 }
 
