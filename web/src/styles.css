@@ -160,3 +160,31 @@ textarea.plain { min-height: 88px; resize: vertical; font-family: inherit; }
 .upload { cursor: pointer; margin-top: 8px; }
 .list .status { background: transparent; min-height: 32px; }
 button.status { cursor: pointer; }
+
+/* PIN screen */
+.lock { max-width: 360px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; gap: 16px; text-align: center; }
+.lock .back { align-self: flex-start; }
+.lock h1 { margin: 0; font: 400 48px/1 var(--font-title); letter-spacing: 0.04em; text-transform: uppercase; }
+.lock form { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.lock input { width: 220px; min-height: 52px; text-align: center; font-size: 28px; letter-spacing: 0.3em; background: var(--card); border: 2px solid var(--label-3); border-radius: var(--r-button); }
+.keypad { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.keypad button { height: 64px; border: 2px solid var(--separator); border-radius: var(--r-tile); background: var(--card); font: 400 30px var(--font-title); }
+.lock .btn { width: 100%; }
+.note-box { border: 1px solid var(--separator); border-radius: var(--r-tile); padding: 12px 14px; text-align: left; line-height: 1.45; }
+
+/* Money */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.stat { padding: 18px 22px; display: flex; flex-direction: column; gap: 6px; }
+.pie-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 20px 36px; }
+.pie { flex: none; transform: rotate(-90deg); }
+.pie circle { cursor: pointer; transition: opacity 0.15s; }
+.legend { flex: 1 1 240px; min-width: 0; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.legend button { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 12px; background: transparent; border: 0; border-radius: var(--r-button); padding: 0 10px; text-align: left; font-size: 15px; }
+.legend button[aria-pressed="true"] { background: var(--card-2); font-weight: 700; }
+.swatch { flex: none; width: 14px; height: 14px; border-radius: 3px; }
+.sub { border-top: 1px solid var(--separator); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.row-btn { width: 100%; min-height: 60px; display: flex; align-items: center; gap: 12px; background: transparent; border: 0; padding: 0 20px; text-align: left; }
+.dig-body { border-top: 1px solid var(--separator); padding: 6px 20px 16px; }
+.feed { border-style: dashed; border-color: var(--label-3); }
+select.inline { min-height: 40px; background: var(--bg); border: 1px solid var(--label-3); border-radius: var(--r-button); padding: 0 8px; font-size: 14px; max-width: 150px; }
+.amount-in { color: var(--electro); }
