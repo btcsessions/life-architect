@@ -1,0 +1,19 @@
+services:
+  life-architect:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Set LA_BIND to one address (e.g. the Umbrel's Tailscale IP) to stop it listening on the whole LAN.
+      - "${LA_BIND:-0.0.0.0}:${LA_PORT:-4600}:4600"
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: ${TZ:-America/Edmonton}
+      # Optional. Any OpenAI-compatible chat endpoint (Hermes, LM Studio, Maple proxy). Without it, quick-add files by rules.
+      LLM_URL: ${LLM_URL:-}
+      LLM_KEY: ${LLM_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      # Optional. Any OpenAI-compatible speech-to-text endpoint (a local Whisper server). Without it, the mic is off.
+      STT_URL: ${STT_URL:-}
+      STT_KEY: ${STT_KEY:-}
+      STT_MODEL: ${STT_MODEL:-}

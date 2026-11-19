@@ -1,0 +1,33 @@
+{
+  "name": "life-architect",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:server": "tsx watch server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "better-sqlite3": "^11.7.0",
+    "hono": "^4.6.14",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@fontsource-variable/nunito-sans": "^5.1.0",
+    "@fontsource/bebas-neue": "^5.1.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  }
+}
