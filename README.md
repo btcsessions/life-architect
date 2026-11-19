@@ -44,8 +44,11 @@ Your data lives in `./data/life.db`. Back that file up; nothing else needs keepi
 
 - **No login yet.** Anyone who can reach the port can use the deck. Keep it on Tailscale: set `LA_BIND` in `.env`
   to the Umbrel's Tailscale address so it does not listen on the home network.
-- **The mic and "install as app" need HTTPS.** Browsers block the microphone on plain `http://` addresses.
-  `tailscale serve --bg 4600` on the Umbrel gives the deck an `https://…ts.net` address that works for both.
+- **Voice.** The Umbrel app bundles a Whisper speech-to-text service, so the mic works after install (the first
+  start downloads its model, which takes a few minutes). Tap the mic, talk, tap again: it is written down and filed.
+- **Live recording needs HTTPS.** Browsers block the microphone on plain `http://` addresses. Without HTTPS the mic
+  button hands off to the device's own recorder instead, which works but takes more taps. Serving the deck through
+  Tailscale HTTPS (`tailscale serve`) gives one-tap recording and lets you install it as an app on your phone.
 - **Without a model, filing uses simple rules.** It recognises dates ("by Friday", "tomorrow"), time ("90 minutes"),
   importance ("important", "low priority"), hand-offs ("ask Nathan to…") and a few topic words. Set `LLM_URL` and
   `LLM_MODEL` to have a model do the filing; if the model fails, it falls back to the rules.

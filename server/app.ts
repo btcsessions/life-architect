@@ -205,28 +205,45 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
     return r.changes ? c.json({ ok: true }) : c.json({ error: "That task no longer exists." }, 404);
   });
 
-  // Voice: the browser records, this forwards the audio to a speech-to-text service you run.
+  // Voice: the browser records, this forwards the audio to a speech-to-text service on the Umbrel.
+  // Two styles are understood: an OpenAI-style address ending in /v1, and the
+  // whisper-asr-webservice container (anything else), which is what the Umbrel app bundles.
   app.post("/api/transcribe", async (c) => {
-    const stt = setting("stt_url");
+    const stt = setting("stt_url").replace(/\/$/, "");
     if (!stt) return c.json({ error: "Speech-to-text isn't set up yet. Add it in Settings." }, 501);
     const form = await c.req.formData().catch(() => null);
     const audio = form?.get("audio");
-    if (!(audio instanceof File)) return c.json({ error: "No audio received." }, 400);
+    if (!(audio instanceof File) || audio.size === 0) return c.json({ error: "No audio received." }, 400);
+    if (audio.size > 25 * 1024 * 1024) return c.json({ error: "That recording is too long. Keep voice notes under a few minutes." }, 400);
+    const name = audio.name || "note.webm";
+    const key = setting("stt_key");
     const out = new FormData();
-    out.set("file", audio, audio.name || "note.webm");
-    out.set("model", setting("stt_model") || "whisper-1");
+    let url: string;
+    if (/\/v1$/.test(stt)) {
+      out.set("file", audio, name);
+      out.set("model", setting("stt_model") || "whisper-1");
+      url = `${stt}/audio/transcriptions`;
+    } else {
+      out.set("audio_file", audio, name);
+      const lang = (process.env.STT_LANGUAGE ?? "").trim();
+      url = `${stt}/asr?task=transcribe&output=json&encode=true${lang ? `&language=${encodeURIComponent(lang)}` : ""}`;
+    }
     try {
-      const res = await fetch(`${stt.replace(/\/$/, "")}/audio/transcriptions`, {
+      const res = await fetch(url, {
         method: "POST",
-        headers: setting("stt_key") ? { authorization: `Bearer ${setting("stt_key")}` } : {},
+        headers: key ? { authorization: `Bearer ${key}` } : {},
         body: out,
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(120_000),
       });
-      if (!res.ok) throw new Error(`speech service answered ${res.status}`);
+      if (!res.ok) throw new Error(`the speech service answered ${res.status}`);
       const body: any = await res.json();
-      return c.json({ text: String(body.text ?? "").trim() });
+      return c.json({ text: String(body?.text ?? "").trim() });
     } catch (err) {
-      return c.json({ error: `Couldn't transcribe: ${(err as Error).message}.` }, 502);
+      const e = err as Error;
+      const why = e.name === "TimeoutError" ? "the speech service took too long"
+        : /fetch failed/.test(e.message) ? "the speech service isn't answering. If you just installed or updated, it may still be downloading its model; try again in a few minutes"
+        : e.message;
+      return c.json({ error: `Couldn't transcribe: ${why}.` }, 502);
     }
   });
 

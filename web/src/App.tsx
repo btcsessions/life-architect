@@ -401,78 +401,113 @@ function Editor({ task, areas, act, onClose }: { task: Task; areas: AreaView[]; 
 
 function QuickAdd({ stt, onFiled, onError }: { stt: boolean; onFiled: (t: Task[]) => void; onError: (m: string) => void }) {
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<null | "hearing" | "filing">(null);
   const [recording, setRecording] = useState(false);
+  const [seconds, setSeconds] = useState(0);
   const [micNote, setMicNote] = useState<string | null>(null);
   const recorder = useRef<MediaRecorder | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!recording) return;
+    setSeconds(0);
+    const t = setInterval(() => setSeconds((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [recording]);
 
   const submit = async (value: string) => {
     const v = value.trim();
-    if (!v || busy) return;
-    setBusy(true);
+    if (!v) return;
+    setBusy("filing");
     try {
       const { created } = await api.capture(v);
       setText("");
       onFiled(created);
     } catch (e) {
+      // Keep what was said so it isn't lost if filing fails.
+      setText(v);
       onError((e as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
+    }
+  };
+
+  // Audio in, filed tasks out: no step in between.
+  const hear = async (audio: Blob, name?: string) => {
+    setBusy("hearing");
+    try {
+      const { text: heard } = await api.transcribe(audio, name);
+      if (heard) await submit(heard);
+      else setMicNote("Didn't catch anything. Try again a little closer to the mic.");
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(null);
     }
   };
 
   const toggleMic = async () => {
-    if (recording) {
-      recorder.current?.stop();
-      return;
-    }
+    if (recording) return recorder.current?.stop();
+    setMicNote(null);
     if (!stt) return setMicNote("Voice needs a speech-to-text service on the Umbrel. It isn't set up yet, so type for now.");
-    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
-      return setMicNote("The browser only allows the microphone over HTTPS. Open the deck through its Tailscale HTTPS address.");
+    // Browsers only allow live recording over HTTPS. Without it, hand off to the device's own recorder.
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined")
+      return fileInput.current?.click();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const rec = new MediaRecorder(stream);
       const chunks: Blob[] = [];
       rec.ondataavailable = (e) => chunks.push(e.data);
-      rec.onstop = async () => {
+      rec.onstop = () => {
         stream.getTracks().forEach((t) => t.stop());
         setRecording(false);
-        setBusy(true);
-        try {
-          const { text: heard } = await api.transcribe(new Blob(chunks, { type: rec.mimeType }));
-          setBusy(false);
-          if (heard) await submit(heard);
-          else setMicNote("Didn't catch anything. Try again a little closer to the mic.");
-        } catch (e) {
-          setBusy(false);
-          onError((e as Error).message);
-        }
+        const type = rec.mimeType || "audio/webm";
+        hear(new Blob(chunks, { type }), /mp4|aac/.test(type) ? "note.m4a" : /ogg/.test(type) ? "note.ogg" : "note.webm");
       };
       recorder.current = rec;
       rec.start();
-      setMicNote(null);
       setRecording(true);
     } catch {
       setMicNote("Microphone access was blocked. Allow it for this site in the browser's settings.");
     }
   };
 
+  const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  const placeholder = recording ? `Listening… ${clock} · tap the mic to stop and file`
+    : busy === "hearing" ? "Writing down what you said…"
+    : busy === "filing" ? "Filing…"
+    : "Add anything: what, when it's due, how long, how important";
+
   return (
     <footer className="quick">
       {micNote && <p className="small quick-note" role="status">{micNote}</p>}
-      <form className="quick-bar" onSubmit={(e) => { e.preventDefault(); submit(text); }}>
+      <form className="quick-bar" onSubmit={(e) => { e.preventDefault(); if (!busy) submit(text); }}>
         <label htmlFor="quick" className="sr">Quick add</label>
         <input
           id="quick"
           type="text"
           autoComplete="off"
-          placeholder={recording ? "Listening… tap the mic to stop" : "Add anything: what, when it's due, how long, how important"}
-          value={text}
+          placeholder={placeholder}
+          value={recording || busy === "hearing" ? "" : text}
           onChange={(e) => setText(e.target.value)}
-          disabled={busy || recording}
+          disabled={Boolean(busy) || recording}
         />
-        {text.trim() && <button className="btn" type="submit" disabled={busy}>{busy ? "Filing…" : "Add"}</button>}
-        <button type="button" className={recording ? "mic on" : "mic"} aria-label={recording ? "Stop and file" : "Talk"} aria-pressed={recording} onClick={toggleMic} disabled={busy}>
+        {text.trim() && !recording && <button className="btn" type="submit" disabled={Boolean(busy)}>{busy ? "Filing…" : "Add"}</button>}
+        <input
+          ref={fileInput}
+          className="sr"
+          type="file"
+          accept="audio/*"
+          capture
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (f) hear(f, f.name);
+          }}
+        />
+        <button type="button" className={recording ? "mic on" : "mic"} aria-label={recording ? "Stop and file" : "Talk"} aria-pressed={recording} onClick={toggleMic} disabled={Boolean(busy)}>
           <Mic />
         </button>
       </form>

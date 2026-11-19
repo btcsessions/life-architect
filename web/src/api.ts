@@ -47,9 +47,9 @@ export const api = {
   models: (body: Record<string, string>) =>
     call<{ ok: boolean; models: string[]; message: string }>("/api/settings/models", json("POST", body)),
   testModel: () => call<{ ok: boolean; message: string }>("/api/settings/test", { method: "POST" }),
-  transcribe: (audio: Blob) => {
+  transcribe: (audio: Blob, name = "note.webm") => {
     const form = new FormData();
-    form.set("audio", audio, "note.webm");
+    form.set("audio", audio, name);
     return call<{ text: string }>("/api/transcribe", { method: "POST", body: form });
   },
 };

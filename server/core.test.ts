@@ -197,3 +197,47 @@ describe("model list", () => {
     }
   });
 });
+
+describe("voice", () => {
+  const send = async (app: ReturnType<typeof createApp>) => {
+    const form = new FormData();
+    form.set("audio", new File([new Uint8Array([1, 2, 3])], "note.webm", { type: "audio/webm" }));
+    return app.request("/api/transcribe", { method: "POST", body: form });
+  };
+  const withUrl = async (url: string) => {
+    const app = createApp(openDb(":memory:"));
+    await app.request("/api/settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ stt_url: url }) });
+    return app;
+  };
+
+  it("speaks both speech-service styles", async () => {
+    const real = globalThis.fetch;
+    const seen: Array<[string, string[]]> = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      seen.push([String(url), [...(init.body as FormData).keys()]]);
+      return new Response(JSON.stringify({ text: " book the flights " }));
+    }) as typeof fetch;
+    try {
+      expect(await (await send(await withUrl("http://whisper:9000"))).json()).toEqual({ text: "book the flights" });
+      expect(await (await send(await withUrl("http://stt/v1/"))).json()).toEqual({ text: "book the flights" });
+      expect(seen[0][0]).toBe("http://whisper:9000/asr?task=transcribe&output=json&encode=true");
+      expect(seen[0][1]).toEqual(["audio_file"]);
+      expect(seen[1][0]).toBe("http://stt/v1/audio/transcriptions");
+      expect(seen[1][1]).toEqual(["file", "model"]);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it("explains a speech service that isn't up yet", async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new TypeError("fetch failed"); }) as typeof fetch;
+    try {
+      const res = await send(await withUrl("http://whisper:9000"));
+      expect(res.status).toBe(502);
+      expect((await res.json()).error).toMatch(/still be downloading its model/);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
