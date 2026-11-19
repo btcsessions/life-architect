@@ -20,6 +20,8 @@ export interface Task {
   importance: number;
   /** YYYY-MM-DD */
   due: string | null;
+  /** HH:MM, only meaningful with a due date. */
+  due_time: string | null;
   minutes: number | null;
   status: "open" | "done";
   /** Set when someone else is doing it: it then counts as "moving without you". */
@@ -73,6 +75,10 @@ export function openDb(path = process.env.LA_DB ?? "data/life.db") {
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS tasks_open ON tasks(status, area_id);
   `);
+  // Columns added after the first release.
+  const cols = (db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name);
+  if (!cols.includes("due_time")) db.exec("ALTER TABLE tasks ADD COLUMN due_time TEXT");
+
   const seed = db.prepare("INSERT OR IGNORE INTO areas (id, name, sort, locked) VALUES (?, ?, ?, ?)");
   AREAS.forEach(([id, name, locked], i) => seed.run(id, name, i, locked));
   return db;

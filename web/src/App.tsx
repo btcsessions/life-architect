@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, dueLabel, type AreaView, type Config, type Deck, type Settings, type Task } from "./api";
+import { api, call, dueLabel, type AreaView, type Config, type Deck, type Task } from "./api";
+import { SettingsPanel } from "./Settings";
+import { Travel } from "./Travel";
+import { Money } from "./Money";
+import { People } from "./People";
+import { Inbox } from "./Inbox";
+
+/** Areas that have their own full screen. */
+const SCREENS: Record<string, string> = { travel: "Trips", money: "Money", people: "People", inbox: "Inbox" };
 
 const ICONS: Record<string, string> = {
   work: "M4 4h12a2 2 0 012 2v7a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zM8.5 7.5v4l3.5-2z",
@@ -38,6 +46,9 @@ export function App() {
   const [editing, setEditing] = useState<number | null>(null);
   const [filed, setFiled] = useState<Task[] | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [view, setView] = useState<string>("deck");
+  const [added, setAdded] = useState<Array<{ text: string; source: string }> | null>(null);
+  const back = () => { setView("deck"); load(); };
 
   const load = useCallback(async () => {
     try {
@@ -90,12 +101,26 @@ export function App() {
         </div>
       )}
 
-      {deck && (
+      {view === "travel" && <Travel onBack={back} onError={setError} />}
+      {view === "money" && <Money onBack={back} onError={setError} />}
+      {view === "people" && <People onBack={back} onError={setError} stt={Boolean(config?.stt)} />}
+      {view === "inbox" && <Inbox onBack={back} onError={setError} stt={Boolean(config?.stt)} />}
+
+      {view === "deck" && deck && (
         <>
           <NextUp deck={deck} onDone={(id) => act(() => api.patch(id, { status: "done" }))} onLater={(id) => act(() => api.patch(id, { snooze: true }))} />
 
           {deck.addedToday > 0 && (
-            <p className="muted small">{deck.addedToday} added today from other apps</p>
+            <div>
+              <button className="btn ghost" aria-expanded={Boolean(added)} onClick={async () => setAdded(added ? null : (await call<{ items: Array<{ text: string; source: string }> }>("/api/added")).items)}>
+                {deck.addedToday} added today from other apps · {added ? "hide" : "review"}
+              </button>
+              {added && (
+                <ul className="added">
+                  {added.map((a, i) => <li key={i}><span className="eyebrow electro">{a.source}</span><span>{a.text}</span></li>)}
+                </ul>
+              )}
+            </div>
           )}
 
           <main className="modules">
@@ -109,6 +134,7 @@ export function App() {
                 editing={editing}
                 onToggle={() => { setOpen(open === a.id ? null : a.id); setEditing(null); }}
                 onEdit={setEditing}
+                onOpenScreen={SCREENS[a.id] ? () => setView(a.id) : undefined}
                 act={act}
               />
             ))}
@@ -135,122 +161,12 @@ export function App() {
         </div>
       )}
 
-      <QuickAdd
+      {view === "deck" && <QuickAdd
         stt={Boolean(config?.stt)}
         onError={setError}
         onFiled={async (tasks) => { setFiled(tasks); await load(); }}
-      />
+      />}
     </div>
-  );
-}
-
-function SettingsPanel({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
-  const [s, setS] = useState<Settings | null>(null);
-  const [form, setForm] = useState<Record<string, string>>({});
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [models, setModels] = useState<string[] | null>(null);
-  const [typeIt, setTypeIt] = useState(false);
-
-  const findModels = async (url: string, key?: string) => {
-    if (!url.trim()) return;
-    setBusy(true);
-    try {
-      const r = await api.models({ llm_url: url, ...(key ? { llm_key: key } : {}) });
-      setModels(r.ok ? r.models : null);
-      setTypeIt(false);
-      setMsg({ ok: r.ok, text: r.message });
-      // One model on offer: pick it.
-      if (r.ok && r.models.length === 1) setForm((f) => ({ ...f, llm_model: r.models[0] }));
-    } catch (e) {
-      setMsg({ ok: false, text: (e as Error).message });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    api.settings().then((v) => { setS(v); if (v.llm_url) findModels(v.llm_url); }).catch((e) => setMsg({ ok: false, text: (e as Error).message }));
-  }, []);
-
-  const set = (k: string) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
-  const save = async (thenTest: boolean) => {
-    setBusy(true);
-    setMsg(null);
-    try {
-      setS(await api.saveSettings(form));
-      setForm({});
-      onSaved();
-      if (thenTest) {
-        const r = await api.testModel();
-        setMsg({ ok: r.ok, text: r.message });
-      } else setMsg({ ok: true, text: "Saved." });
-    } catch (e) {
-      setMsg({ ok: false, text: (e as Error).message });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (!s) return <section className="card settings"><p className="muted">{msg?.text ?? "Loading settings…"}</p></section>;
-  const val = (k: keyof Settings) => form[k] ?? String(s[k] ?? "");
-  return (
-    <section className="card settings" aria-label="Settings">
-      <div className="settings-head">
-        <h2 className="module-name">Settings</h2>
-        <button className="btn ghost" onClick={onClose}>Close</button>
-      </div>
-
-      <fieldset>
-        <legend className="eyebrow">Model that files your quick-adds</legend>
-        <p className="muted small">Any OpenAI-style address, such as Hermes on this Umbrel. Leave empty to file by simple rules.</p>
-        <div className="fields">
-          <label htmlFor="llm_url">Address
-            <input id="llm_url" type="url" inputMode="url" placeholder="http://…:8642/v1" value={val("llm_url")} onChange={set("llm_url")} onBlur={(e) => { if (e.target.value.trim() && e.target.value !== s.llm_url) findModels(e.target.value, form.llm_key); }} />
-          </label>
-          <label htmlFor="llm_key">Key, if it needs one
-            <input id="llm_key" type="password" autoComplete="off" placeholder={s.llm_key_set ? "Saved. Type to replace" : "None saved"} value={form.llm_key ?? ""} onChange={set("llm_key")} />
-          </label>
-          <label htmlFor="llm_model">Model
-            {models && !typeIt ? (
-              <select id="llm_model" value={val("llm_model")} onChange={set("llm_model")}>
-                <option value="">Choose a model…</option>
-                {val("llm_model") && !models.includes(val("llm_model")) && <option value={val("llm_model")}>{val("llm_model")}</option>}
-                {models.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-            ) : (
-              <input id="llm_model" type="text" autoCapitalize="off" placeholder="Find models, or type the name" value={val("llm_model")} onChange={set("llm_model")} />
-            )}
-          </label>
-        </div>
-        <div className="row">
-          <button className="btn" type="button" disabled={busy || !val("llm_url").trim()} onClick={() => findModels(val("llm_url"), form.llm_key)}>Find models</button>
-          {models && <button className="btn ghost" type="button" onClick={() => setTypeIt(!typeIt)}>{typeIt ? "Pick from the list" : "Type it instead"}</button>}
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend className="eyebrow">Speech-to-text for the mic</legend>
-        <p className="muted small">A Whisper-style service. The mic stays off until this is set.</p>
-        <div className="fields">
-          <label htmlFor="stt_url">Address
-            <input id="stt_url" type="url" inputMode="url" placeholder="http://…/v1" value={val("stt_url")} onChange={set("stt_url")} />
-          </label>
-          <label htmlFor="stt_model">Model name
-            <input id="stt_model" type="text" autoCapitalize="off" placeholder="whisper-1" value={val("stt_model")} onChange={set("stt_model")} />
-          </label>
-          <label htmlFor="stt_key">Key
-            <input id="stt_key" type="password" autoComplete="off" placeholder={s.stt_key_set ? "Saved. Type to replace" : "None saved"} value={form.stt_key ?? ""} onChange={set("stt_key")} />
-          </label>
-        </div>
-      </fieldset>
-
-      {msg && <p className={msg.ok ? "small electro" : "small accent"} role="status">{msg.text}</p>}
-      <div className="row">
-        <button className="btn" disabled={busy} onClick={() => save(true)}>{busy ? "Working…" : "Save and test the model"}</button>
-        <button className="btn ghost" disabled={busy} onClick={() => save(false)}>Save only</button>
-      </div>
-    </section>
   );
 }
 
@@ -301,7 +217,7 @@ function NextUp({ deck, onDone, onLater }: { deck: Deck; onDone: (id: number) =>
 
 function Module(props: {
   area: AreaView; today: string; areas: AreaView[]; open: boolean; editing: number | null;
-  onToggle: () => void; onEdit: (id: number | null) => void; act: (fn: () => Promise<unknown>) => void;
+  onToggle: () => void; onEdit: (id: number | null) => void; onOpenScreen?: () => void; act: (fn: () => Promise<unknown>) => void;
 }) {
   const { area, today, open, editing, onToggle, onEdit, act } = props;
   return (
@@ -313,8 +229,9 @@ function Module(props: {
       </button>
       {open && (
         <div className="module-body">
+          {props.onOpenScreen && <button className="btn open-screen" onClick={props.onOpenScreen}>Open {SCREENS[area.id]}</button>}
           {area.locked ? (
-            <p className="muted">{area.need > 0 ? "Something due. " : ""}People opens with its own PIN once that phase is built.</p>
+            <p className="muted">{area.need > 0 ? "Something due. " : ""}Details are behind the People PIN.</p>
           ) : area.items.length === 0 ? (
             <p className="muted">Nothing here yet. Add to it from the bar below.</p>
           ) : (
@@ -349,7 +266,7 @@ function Module(props: {
 function taskMeta(t: Task, today: string): string {
   const parts: string[] = [];
   if (t.delegate) parts.push(`With ${t.delegate}`);
-  if (t.due) parts.push(dueLabel(t.due, today));
+  if (t.due) parts.push(dueLabel(t.due, today) + (t.due_time ? ` at ${t.due_time}` : ""));
   if (t.minutes) parts.push(t.minutes < 60 ? `${t.minutes} min` : `${+(t.minutes / 60).toFixed(1)} hr`);
   if (t.snoozed_until && t.snoozed_until > today) parts.push("Not today");
   return parts.join(" · ");
@@ -371,6 +288,9 @@ function Editor({ task, areas, act, onClose }: { task: Task; areas: AreaView[]; 
       <div className="fields">
         <label htmlFor={`${id}-due`}>Due
           <input id={`${id}-due`} type="date" defaultValue={task.due ?? ""} onChange={(e) => save({ due: e.target.value || null })} />
+        </label>
+        <label htmlFor={`${id}-time`}>Time
+          <input id={`${id}-time`} type="time" defaultValue={task.due_time ?? ""} onChange={(e) => save({ due_time: e.target.value || null })} />
         </label>
         <label htmlFor={`${id}-min`}>Minutes
           <input id={`${id}-min`} type="number" min="1" inputMode="numeric" defaultValue={task.minutes ?? ""}

@@ -5,6 +5,7 @@ export interface Task {
   note: string | null;
   importance: number;
   due: string | null;
+  due_time: string | null;
   minutes: number | null;
   status: "open" | "done";
   delegate: string | null;
@@ -16,12 +17,9 @@ export interface AreaView { id: string; name: string; locked: boolean; need: num
 export interface NextItem { id: number; area_id: string; title: string; locked: boolean; why: string[] }
 export interface Deck { today: string; next: NextItem[]; areas: AreaView[]; addedToday: number }
 export interface Config { model: string | null; stt: boolean }
-export interface Settings {
-  llm_url: string; llm_model: string; llm_key_set: boolean;
-  stt_url: string; stt_model: string; stt_key_set: boolean;
-}
+export type Settings = Record<string, string | boolean>;
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
+export async function call<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, init);
@@ -32,7 +30,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) throw new Error((body as { error?: string }).error ?? `Something went wrong (${res.status}).`);
   return body as T;
 }
-const json = (method: string, body: unknown): RequestInit => ({
+export const json = (method: string, body: unknown): RequestInit => ({
   method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
 });
 
@@ -46,7 +44,7 @@ export const api = {
   saveSettings: (body: Record<string, string>) => call<Settings>("/api/settings", json("PUT", body)),
   models: (body: Record<string, string>) =>
     call<{ ok: boolean; models: string[]; message: string }>("/api/settings/models", json("POST", body)),
-  testModel: () => call<{ ok: boolean; message: string }>("/api/settings/test", { method: "POST" }),
+  testModel: (prefix = "llm") => call<{ ok: boolean; message: string }>("/api/settings/test", json("POST", { prefix })),
   transcribe: (audio: Blob, name = "note.webm") => {
     const form = new FormData();
     form.set("audio", audio, name);

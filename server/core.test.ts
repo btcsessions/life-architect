@@ -8,7 +8,7 @@ const DAY = "2026-11-18"; // a Wednesday
 
 function task(p: Partial<Task>): Task {
   return {
-    id: 1, area_id: "work", title: "t", note: null, importance: 2, due: null, minutes: null,
+    id: 1, area_id: "work", title: "t", note: null, importance: 2, due: null, due_time: null, minutes: null,
     status: "open", delegate: null, snoozed_until: null, source: "app", created_at: DAY, done_at: null, ...p,
   };
 }
@@ -186,11 +186,11 @@ describe("model list", () => {
         expect(init.headers.authorization).toBe("Bearer k");
         return new Response(JSON.stringify({ data: [{ id: "b-model" }, { id: "a-model" }, { id: "a-model" }] }));
       }) as typeof fetch;
-      expect(await ask({ llm_url: "http://m/v1/", llm_key: "k" })).toMatchObject({ ok: true, models: ["a-model", "b-model"] });
+      expect(await ask({ url: "http://m/v1/", key: "k" })).toMatchObject({ ok: true, models: ["a-model", "b-model"] });
       globalThis.fetch = (async () => new Response("", { status: 401 })) as typeof fetch;
-      expect((await ask({ llm_url: "http://m/v1" })).message).toMatch(/wants a key/);
+      expect((await ask({ url: "http://m/v1" })).message).toMatch(/wants a key/);
       globalThis.fetch = (async () => new Response("", { status: 404 })) as typeof fetch;
-      expect((await ask({ llm_url: "http://m" })).message).toMatch(/\/v1/);
+      expect((await ask({ url: "http://m" })).message).toMatch(/\/v1/);
       expect(await ask({})).toMatchObject({ ok: false, message: "Enter the address first." });
     } finally {
       globalThis.fetch = real;
@@ -239,5 +239,33 @@ describe("voice", () => {
     } finally {
       globalThis.fetch = real;
     }
+  });
+});
+
+describe("relay", () => {
+  const J = { "content-type": "application/json" };
+  it("needs the token, adds to the deck, and never exposes People", async () => {
+    const db = openDb(":memory:");
+    const app = createApp(db, () => new Date(2026, 10, 18, 15, 0, 0));
+    expect((await app.request("/api/relay/next")).status).toBe(503);
+    const { token } = await (await app.request("/api/settings/relay-token", { method: "POST" })).json();
+    expect(token).toHaveLength(48);
+    expect((await app.request("/api/relay/next")).status).toBe(401);
+    expect((await app.request("/api/relay/next", { headers: { authorization: "Bearer nope" } })).status).toBe(401);
+    const auth = { authorization: `Bearer ${token}`, ...J };
+
+    const add = await (await app.request("/api/relay/add", { method: "POST", headers: auth, body: JSON.stringify({ text: "Santa photos with the family on Friday at 3pm", source: "Claude" }) })).json();
+    expect(add.added[0]).toMatchObject({ title: "Santa photos with the family", area: "Family", due: "2026-11-20", time: "15:00" });
+
+    db.prepare("INSERT INTO tasks (area_id, title, importance, due, created_at) VALUES ('people', 'private thing', 3, ?, ?)").run(DAY, DAY);
+    const next = await (await app.request("/api/relay/next", { headers: auth })).json();
+    expect(JSON.stringify(next)).not.toContain("private thing");
+    expect(next.needs_you).toEqual({ Family: 1, People: 1 });
+    expect(next.next).toHaveLength(1);
+
+    expect((await (await app.request("/api/deck")).json()).addedToday).toBe(1);
+    expect((await (await app.request("/api/added")).json()).items[0]).toMatchObject({ source: "claude" });
+    // the token itself is never returned by settings
+    expect(JSON.stringify(await (await app.request("/api/settings")).json())).not.toContain(token);
   });
 });

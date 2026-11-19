@@ -3,13 +3,35 @@ import type { Db, Task, Area } from "./db.ts";
 import { today } from "./db.ts";
 import { rank } from "./rank.ts";
 import { fileCapture, type Filed, type ModelConfig } from "./file.ts";
+import { mountRelay } from "./relay.ts";
+import { mountFiles } from "./files.ts";
+import { mountTravel } from "./travel.ts";
 
 /** Settings the user can change in the app. Each falls back to the environment variable of the same name. */
-const SETTING_KEYS = ["llm_url", "llm_key", "llm_model", "stt_url", "stt_key", "stt_model"] as const;
-type SettingKey = (typeof SETTING_KEYS)[number];
-const SECRET: SettingKey[] = ["llm_key", "stt_key"];
+export const SETTING_KEYS = [
+  "llm_url", "llm_key", "llm_model", "stt_url", "stt_key", "stt_model",
+  "money_llm_url", "money_llm_key", "money_llm_model",
+  "people_llm_url", "people_llm_key", "people_llm_model",
+  "mail_user", "mail_password", "mail_from_name", "mail_auto_delegate",
+] as const;
+export type SettingKey = (typeof SETTING_KEYS)[number];
+const SECRET: SettingKey[] = ["llm_key", "stt_key", "money_llm_key", "people_llm_key", "mail_password"];
 
-const EDITABLE = ["title", "note", "importance", "due", "minutes", "delegate", "area_id", "snoozed_until"] as const;
+/** What each module gets from the core app. */
+export interface Ctx {
+  db: Db;
+  now: () => Date;
+  day: () => string;
+  setting: (k: SettingKey) => string;
+  /** The model for a module: its own if set, otherwise none (modules never borrow the deck's model silently). */
+  modelFor: (prefix: "llm" | "money_llm" | "people_llm") => ModelConfig | null;
+  /** File free text into deck tasks. Never files into People. */
+  capture: (text: string, source: string) => Promise<{ via: string; created: Array<Task & { area_name: string }> }>;
+  /** Internal key/value store for things that aren't user settings (tokens, PIN hashes). */
+  secret: { get: (k: string) => string | null; set: (k: string, v: string | null) => void };
+}
+
+const EDITABLE = ["title", "note", "importance", "due", "due_time", "minutes", "delegate", "area_id", "snoozed_until"] as const;
 
 export function createApp(db: Db, now: () => Date = () => new Date()) {
   const app = new Hono();
@@ -19,10 +41,18 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
     const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(k) as { value: string } | undefined;
     return (row?.value ?? process.env[k.toUpperCase()] ?? "").trim();
   };
-  const model = (): ModelConfig | null => {
-    const url = setting("llm_url").replace(/\/$/, "");
-    const name = setting("llm_model");
-    return url && name ? { url, model: name, key: setting("llm_key") || undefined } : null;
+  const modelFor = (prefix: "llm" | "money_llm" | "people_llm"): ModelConfig | null => {
+    const url = setting(`${prefix}_url`).replace(/\/$/, "");
+    const name = setting(`${prefix}_model`);
+    return url && name ? { url, model: name, key: setting(`${prefix}_key`) || undefined } : null;
+  };
+  const model = () => modelFor("llm");
+  const secret = {
+    get: (k: string) => (db.prepare("SELECT value FROM settings WHERE key = ?").get(`_${k}`) as { value: string } | undefined)?.value ?? null,
+    set: (k: string, v: string | null) => {
+      if (v === null) db.prepare("DELETE FROM settings WHERE key = ?").run(`_${k}`);
+      else db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(`_${k}`, v);
+    },
   };
 
   const areas = () => db.prepare("SELECT * FROM areas ORDER BY sort").all() as Area[];
@@ -32,10 +62,10 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
   function insert(f: Filed, source: string): Task {
     const r = db
       .prepare(
-        `INSERT INTO tasks (area_id, title, note, importance, due, minutes, delegate, source, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (area_id, title, note, importance, due, due_time, minutes, delegate, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(f.area, f.title, f.note, f.importance, f.due, f.minutes, f.delegate, source, now().toISOString());
+      .run(f.area, f.title, f.note, f.importance, f.due, f.due ? f.time ?? null : null, f.minutes, f.delegate, source, now().toISOString());
     return getTask(Number(r.lastInsertRowid))!;
   }
 
@@ -56,6 +86,7 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
       if (!(k in body)) continue;
       const v = body[k];
       if (typeof v !== "string" || v.length > 2000) return c.json({ error: `"${k}" must be text.` }, 400);
+      if (k === "mail_user" && v.trim() && !/^\S+@\S+\.\S+$/.test(v.trim())) return c.json({ error: "That doesn't look like an email address." }, 400);
       if (k.endsWith("_url") && v.trim() && !/^https?:\/\/\S+$/.test(v.trim()))
         return c.json({ error: "An address starts with http:// or https://" }, 400);
       db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v.trim());
@@ -67,8 +98,9 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
   // Uses the address and key being typed if given, otherwise the saved ones.
   app.post("/api/settings/models", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const url = (typeof body.llm_url === "string" && body.llm_url.trim() ? body.llm_url.trim() : setting("llm_url")).replace(/\/$/, "");
-    const key = typeof body.llm_key === "string" && body.llm_key.trim() ? body.llm_key.trim() : setting("llm_key");
+    const prefix = body.prefix === "money_llm" || body.prefix === "people_llm" ? body.prefix : "llm";
+    const url = (typeof body.url === "string" && body.url.trim() ? body.url.trim() : setting(`${prefix}_url`)).replace(/\/$/, "");
+    const key = typeof body.key === "string" && body.key.trim() ? body.key.trim() : setting(`${prefix}_key`);
     if (!/^https?:\/\/\S+$/.test(url)) return c.json({ ok: false, models: [], message: "Enter the address first." });
     try {
       const res = await fetch(`${url}/models`, {
@@ -93,7 +125,8 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
 
   // One tiny request, so a wrong address or key is found here and not on the next quick-add.
   app.post("/api/settings/test", async (c) => {
-    const m = model();
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const m = modelFor(body.prefix === "money_llm" || body.prefix === "people_llm" ? body.prefix : "llm");
     if (!m) return c.json({ ok: false, message: "Enter an address and a model name first." });
     try {
       const res = await fetch(`${m.url}/chat/completions`, {
@@ -152,6 +185,16 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
     return c.json({ today: d, next, areas: deck, addedToday });
   });
 
+  async function capture(text: string, source: string) {
+    const { items, via } = await fileCapture(text, day(), model());
+    db.prepare("INSERT INTO captures (text, source, via, created_at) VALUES (?, ?, ?, ?)").run(
+      text, source, via, now().toISOString(),
+    );
+    const names = Object.fromEntries(areas().map((a) => [a.id, a.name]));
+    const created = items.map((f) => insert(f, source)).map((t) => ({ ...t, area_name: names[t.area_id] }));
+    return { via, created };
+  }
+
   // Quick-add: free text in, filed tasks out.
   app.post("/api/capture", async (c) => {
     const body = await c.req.json().catch(() => null);
@@ -159,13 +202,7 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
     if (!text) return c.json({ error: "Nothing to add: the text was empty." }, 400);
     if (text.length > 8000) return c.json({ error: "That's too long for one quick-add (8,000 characters max)." }, 400);
     const source = typeof body?.source === "string" ? body.source.slice(0, 40) : "app";
-    const { items, via } = await fileCapture(text, day(), model());
-    db.prepare("INSERT INTO captures (text, source, via, created_at) VALUES (?, ?, ?, ?)").run(
-      text, source, via, now().toISOString(),
-    );
-    const names = Object.fromEntries(areas().map((a) => [a.id, a.name]));
-    const created = items.map((f) => insert(f, source)).map((t) => ({ ...t, area_name: names[t.area_id] }));
-    return c.json({ via, created });
+    return c.json(await capture(text, source));
   });
 
   app.patch("/api/tasks/:id", async (c) => {
@@ -189,6 +226,8 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
       let v = body[k] as string | number | null;
       if (k === "title" && (typeof v !== "string" || !v.trim())) return c.json({ error: "A task needs a title." }, 400);
       if (k === "importance" && ![1, 2, 3].includes(v as number)) return c.json({ error: "Importance is 1, 2 or 3." }, 400);
+      if (k === "due_time" && v !== null && v !== "" && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v)))
+        return c.json({ error: "Times are HH:MM." }, 400);
       if ((k === "due" || k === "snoozed_until") && v !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(v)))
         return c.json({ error: "Dates are YYYY-MM-DD." }, 400);
       if (k === "minutes" && v !== null && !(Number.isFinite(v) && (v as number) > 0))
@@ -246,6 +285,11 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
       return c.json({ error: `Couldn't transcribe: ${why}.` }, 502);
     }
   });
+
+  const ctx: Ctx = { db, now, day, setting, modelFor, capture, secret };
+  mountRelay(app, ctx);
+  mountFiles(app, ctx);
+  mountTravel(app, ctx);
 
   return app;
 }

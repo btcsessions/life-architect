@@ -8,6 +8,7 @@ export interface Filed {
   title: string;
   importance: number;
   due: string | null;
+  time: string | null;
   minutes: number | null;
   delegate: string | null;
   note: string | null;
@@ -56,6 +57,20 @@ export function parseDue(text: string, day: string): string | null {
   return null;
 }
 
+/** A time of day as HH:MM: "at 3pm", "at 3:30 pm", "at 15:30", "at noon". */
+export function parseTime(text: string): string | null {
+  const t = text.toLowerCase();
+  if (/\bat noon\b/.test(t)) return "12:00";
+  const m = t.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/) ?? t.match(/\bat\s+(\d{1,2}):(\d{2})\b/);
+  if (!m) return null;
+  let h = +m[1];
+  const min = m[2] ? +m[2] : 0;
+  if (m[3] === "pm" && h < 12) h += 12;
+  if (m[3] === "am" && h === 12) h = 0;
+  if (h > 23 || min > 59) return null;
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
 export function parseMinutes(text: string): number | null {
   const t = text.toLowerCase();
   if (/\bhalf an hour\b/.test(t)) return 30;
@@ -85,7 +100,7 @@ function parseDelegate(text: string): string | null {
 
 // Trailing "by Friday", "90 minutes", "important": already captured as fields, so not part of the title.
 const META_TAIL =
-  /[,\s]+(?:and\s+)?(?:it'?s\s+|that'?s\s+)?(?:(?:very\s+)?important|urgent|asap|(?:high|top|low) priority|no rush|(?:about|around|roughly|should take|takes|it takes)?\s*(?:\d+(?:\.\d+)?\s*(?:minutes?|mins?|hours?|hrs?)|half an hour|an hour)|(?:by|due|on|before)?\s*(?:today|tonight|tomorrow(?: morning| afternoon| evening)?|(?:this|next)\s+week|(?:this |next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|\d{4}-\d{2}-\d{2}))$/i;
+  /[,\s]+(?:and\s+)?(?:it'?s\s+|that'?s\s+)?(?:(?:very\s+)?important|urgent|asap|(?:high|top|low) priority|no rush|(?:about|around|roughly|should take|takes|it takes)?\s*(?:\d+(?:\.\d+)?\s*(?:minutes?|mins?|hours?|hrs?)|half an hour|an hour)|(?:by|due|on|before)?\s*(?:today|tonight|tomorrow(?: morning| afternoon| evening)?|(?:this|next)\s+week|(?:this |next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|\d{4}-\d{2}-\d{2})|(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)|at\s+\d{1,2}:\d{2}|at noon)$/i;
 
 function cleanTitle(clause: string): string {
   let s = clause
@@ -119,6 +134,7 @@ export function fileByRules(text: string, day: string): Filed[] {
       title,
       importance: parseImportance(c),
       due: parseDue(c, day),
+      time: parseTime(c),
       minutes: parseMinutes(c),
       delegate: parseDelegate(c),
       note: link ? link[0] : null,
@@ -129,7 +145,7 @@ export function fileByRules(text: string, day: string): Filed[] {
 
 const SYSTEM = (day: string) => `You file a person's spoken or typed notes into tasks. Today is ${day}.
 Return ONLY a JSON array. Each item: {"area": one of ${JSON.stringify(FILE_AREAS)}, "title": short imperative title in their words,
-"importance": 1 (low) | 2 (medium) | 3 (high), "due": "YYYY-MM-DD" or null, "minutes": estimated minutes or null only if they said it,
+"importance": 1 (low) | 2 (medium) | 3 (high), "due": "YYYY-MM-DD" or null, "time": "HH:MM" (24h) or null only if they gave a time of day, "minutes": estimated minutes or null only if they said it,
 "delegate": first name of the person who should do it or null, "note": any link they gave or null}.
 One item per distinct thing to do. Do not invent tasks, dates or people.`;
 
@@ -144,6 +160,7 @@ function validate(raw: unknown, day: string): Filed[] {
       title: r.title.trim().slice(0, 200),
       importance: [1, 2, 3].includes(r.importance) ? r.importance : 2,
       due,
+      time: due && typeof r.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(r.time) ? r.time : null,
       minutes: Number.isFinite(r.minutes) && r.minutes > 0 && r.minutes < 6000 ? Math.round(r.minutes) : null,
       delegate: typeof r.delegate === "string" && r.delegate.trim() ? r.delegate.trim().slice(0, 60) : null,
       note: typeof r.note === "string" && r.note.trim() ? r.note.trim().slice(0, 500) : null,
@@ -157,6 +174,43 @@ export interface ModelConfig {
   url: string; // OpenAI-compatible base, e.g. http://hermes:8000/v1
   key?: string;
   model: string;
+}
+
+export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+
+/** One chat-completions call. Throws with a plain reason on any failure. */
+export async function chat(cfg: ModelConfig, messages: ChatMessage[], timeoutMs = 60_000, fetchFn: typeof fetch = fetch): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetchFn(`${cfg.url}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(cfg.key ? { authorization: `Bearer ${cfg.key}` } : {}) },
+      body: JSON.stringify({ model: cfg.model, temperature: 0.2, messages }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const e = err as Error;
+    throw new Error(e.name === "TimeoutError" ? "the model took too long to answer" : "the model couldn't be reached");
+  }
+  if (res.status === 401 || res.status === 403) throw new Error("the model refused the key");
+  if (!res.ok) throw new Error(`the model answered with an error (${res.status})`);
+  const body: any = await res.json().catch(() => null);
+  const content = body?.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) throw new Error("the model sent back an empty answer");
+  return content.trim();
+}
+
+/** Pull the first JSON object or array out of a model's answer. */
+export function extractJson(content: string): unknown {
+  const starts = [content.indexOf("{"), content.indexOf("[")].filter((i) => i >= 0);
+  if (!starts.length) throw new Error("the model didn't answer in the expected format");
+  const start = Math.min(...starts);
+  const end = Math.max(content.lastIndexOf("}"), content.lastIndexOf("]"));
+  try {
+    return JSON.parse(content.slice(start, end + 1));
+  } catch {
+    throw new Error("the model didn't answer in the expected format");
+  }
 }
 
 export function modelFromEnv(): ModelConfig | null {
