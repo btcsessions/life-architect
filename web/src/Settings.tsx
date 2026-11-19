@@ -157,7 +157,7 @@ export function SettingsPanel({ onClose, onSaved }: { onClose: () => void; onSav
 
       <fieldset>
         <legend className="eyebrow">Relay for Hermes</legend>
-        <p className="muted small">Lets Hermes add to the deck and ask what's next, for things you say in Claude, ChatGPT or Telegram. People is never reachable this way.</p>
+        <p className="muted small">Lets Hermes add to the deck and ask what's next, for things you say in Claude, ChatGPT or Telegram. People can never be read this way; Hermes can only drop notes into it for you to file.</p>
         {relay?.token ? (
           <div className="token">
             <p className="small">Give Hermes these two things. The token is shown only now.</p>

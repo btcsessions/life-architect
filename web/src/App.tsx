@@ -49,6 +49,8 @@ export function App() {
   const [view, setView] = useState<string>("deck");
   const [added, setAdded] = useState<Array<{ text: string; source: string }> | null>(null);
   const back = () => { setView("deck"); load(); };
+  // Inside a module an error is about the last action, so it clears itself.
+  useEffect(() => { if (!error || view === "deck") return; const t = setTimeout(() => setError(null), 7000); return () => clearTimeout(t); }, [error, view]);
 
   const load = useCallback(async () => {
     try {
@@ -97,7 +99,7 @@ export function App() {
       {error && (
         <div className="notice" role="alert">
           <span>{error}</span>
-          <button className="btn ghost" onClick={load}>Try again</button>
+          {view === "deck" ? <button className="btn ghost" onClick={load}>Try again</button> : <button className="btn ghost" onClick={() => setError(null)}>Dismiss</button>}
         </div>
       )}
 

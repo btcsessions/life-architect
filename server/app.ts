@@ -7,6 +7,7 @@ import { mountRelay } from "./relay.ts";
 import { mountFiles } from "./files.ts";
 import { mountTravel } from "./travel.ts";
 import { mountMoney } from "./money.ts";
+import { mountPeople } from "./people.ts";
 
 /** Settings the user can change in the app. Each falls back to the environment variable of the same name. */
 export const SETTING_KEYS = [
@@ -292,6 +293,7 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
   mountFiles(app, ctx);
   mountTravel(app, ctx);
   mountMoney(app, ctx);
+  mountPeople(app, ctx);
 
   return app;
 }
