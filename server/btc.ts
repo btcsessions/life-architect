@@ -58,10 +58,14 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
   const setConf = (k: string, v: string) => db.prepare("INSERT INTO btc_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v);
   const base = (k: string) => conf(k).replace(/\/+$/, "");
   const priceBase = () => base("price_api") || "https://mempool.space/api";
+  // Public servers limit how fast they can be asked, so wait and retry when told to slow down.
   const get = async (url: string) => {
-    const r = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-    if (!r.ok) throw new Error(`${new URL(url).host} answered ${r.status}`);
-    return r.json();
+    for (let attempt = 0; ; attempt++) {
+      const r = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (r.ok) return r.json();
+      if ((r.status === 429 || r.status === 503) && attempt < 5 && !process.env.VITEST) { await new Promise((ok) => setTimeout(ok, 2000 * (attempt + 1))); continue; }
+      throw new Error(r.status === 429 ? `${new URL(url).host} is limiting requests; try again in a few minutes` : `${new URL(url).host} answered ${r.status}`);
+    }
   };
 
   /** Every transaction touching one address, following the server's paging. */
@@ -110,7 +114,9 @@ export function mountBtc(app: Hono, ctx: Ctx, linkTransfers: () => number) {
       let quiet = 0;
       for (let idx = 0; quiet < GAP && idx < 5000; idx += 5) {
         const batch = [0, 1, 2, 3, 4].map((k) => ({ idx: idx + k, address: addressOf(hd, w.type as AddrType, chain, idx + k) }));
-        const results = await Promise.all(batch.map((a) => addressTxs(a.address)));
+        const results: ApiTx[][] = [];
+        if (publicHost(base("api"))) { for (const a of batch) results.push(await addressTxs(a.address)); } // one at a time on a public server
+        else results.push(...(await Promise.all(batch.map((a) => addressTxs(a.address)))));
         batch.forEach((a, k) => {
           const used = results[k].length > 0;
           db.prepare("INSERT INTO btc_addr (wallet_id, chain, idx, address, used) VALUES (?, ?, ?, ?, ?) ON CONFLICT(wallet_id, chain, idx) DO UPDATE SET used = excluded.used").run(w.id, chain, a.idx, a.address, used ? 1 : 0);

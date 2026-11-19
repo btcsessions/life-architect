@@ -132,6 +132,10 @@ function Dashboard({ s, onBack, onError }: { s: Session } & Props) {
             <Dig title="Investments & assets" total="" open={dig === "assets"} onToggle={() => setDig(dig === "assets" ? null : "assets")}>
               <Assets s={s} onError={onError} />
             </Dig>
+            <div className="row">
+              <button className="btn" onClick={() => s.call<{ pairs: number; total: number; unnamed: number }>("/api/money/transfers/sweep", { method: "POST" }).then((r) => { setNote(`${r.pairs ? `Found ${r.pairs} new transfer${r.pairs === 1 ? "" : "s"}` : "No new transfers found"} (${r.total} matched in all).${r.unnamed ? ` ${r.unnamed} transaction${r.unnamed === 1 ? " has" : "s have"} no account name, so ${r.unnamed === 1 ? "it" : "they"} can't be matched.` : ""}`); load(); }).catch((e) => onError(e.message))}>Check for transfers between my accounts</button>
+              {note && /transfer/.test(note) && <span className="small electro" role="status">{note}</span>}
+            </div>
             <Dig title="Every transaction" total={`${sum.count} this month`} open={dig === "tx"} onToggle={() => setDig(dig === "tx" ? null : "tx")}>
               <Transactions s={s} month={sum.month} category={cat} onChanged={load} onError={onError} />
             </Dig>

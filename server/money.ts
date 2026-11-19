@@ -189,6 +189,15 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     return made;
   }
 
+  // Go back over everything already imported and pair up transfers.
+  app.post("/api/money/transfers/sweep", (c) => {
+    const pairs = linkTransfers();
+    const unnamed = (db.prepare("SELECT count(*) AS n FROM money_tx WHERE account IS NULL").get() as { n: number }).n;
+    const total = (db.prepare("SELECT count(*) AS n FROM money_tx WHERE pair_id IS NOT NULL AND amount < 0").get() as { n: number }).n;
+    return c.json({ pairs, total, unnamed });
+  });
+  try { linkTransfers(); } catch { /* first run on an empty table */ }
+
   const categorise = (description: string, merchant: string, amount: number): string => {
     const own = db.prepare("SELECT category FROM money_rules WHERE merchant = ?").get(merchant.toLowerCase()) as { category: string } | undefined;
     if (own) return own.category;
