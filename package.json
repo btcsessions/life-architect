@@ -1,6 +1,6 @@
 {
   "name": "life-architect",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,6 +17,7 @@
     "imapflow": "^2.12.1",
     "mailparser": "^3.14.5",
     "nodemailer": "^10.6.0",
+    "pdfjs-dist": "^4.10.38",
     "tsx": "^4.19.2"
   },
   "devDependencies": {

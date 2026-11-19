@@ -106,6 +106,31 @@ describe("money", () => {
     expect((await app.request("/api/money/import", { method: "POST", headers: h, body: (() => { const f = new FormData(); f.set("file", new File(["x"], "s.pdf")); return f; })() })).status).toBe(400);
   });
 
+  it("reads a PDF statement on the Umbrel, saves nothing until the rows are sent back, and skips repeats", async () => {
+    clock = new Date(2026, 10, 19, 15, 0, 0);
+    const app = make();
+    const h = { cookie: await open(app) };
+    const { readFileSync } = await import("node:fs");
+    const pdf = () => { const f = new FormData(); f.set("file", new File([readFileSync(new URL("./fixtures/card.pdf", import.meta.url))], "visa-nov.pdf", { type: "application/pdf" })); return f; };
+    const real = globalThis.fetch;
+    let called = 0;
+    globalThis.fetch = (async () => { called++; return new Response("{}"); }) as typeof fetch;
+    try {
+      expect((await app.request("/api/money/read-pdf", { method: "POST", body: pdf() })).status).toBe(423); // locked without the PIN
+      const read = await (await app.request("/api/money/read-pdf", { method: "POST", headers: h, body: pdf() })).json();
+      expect(read).toMatchObject({ name: "visa-nov.pdf", via: "here", layout: "card", can_use_model: false });
+      expect(read.rows).toHaveLength(4);
+      expect(called).toBe(0); // no model, no network
+      expect((await (await app.request("/api/money/summary?month=2026-11", { headers: h })).json()).out).toBe(0); // nothing saved yet
+      const save = (rows: unknown) => app.request("/api/money/import-rows", { method: "POST", headers: { ...h, ...J }, body: JSON.stringify({ rows, account: "Visa" }) });
+      expect(await (await save(read.rows)).json()).toEqual({ added: 4, already_there: 0 });
+      expect(await (await save(read.rows)).json()).toEqual({ added: 0, already_there: 4 });
+      expect((await save([{ day: "nonsense", description: "x", amount: 1 }])).status).toBe(400);
+      const junk = new FormData(); junk.set("file", new File(["not a pdf"], "x.pdf"));
+      expect((await app.request("/api/money/read-pdf", { method: "POST", headers: h, body: junk })).status).toBe(400);
+    } finally { globalThis.fetch = real; }
+  });
+
   it("spots repeating charges, a price rise and a double charge", async () => {
     clock = new Date(2026, 10, 18, 15, 0, 0);
     const app = make();

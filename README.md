@@ -17,7 +17,7 @@ One deck for everything on your plate, served from your Umbrel and reached over 
   writes replies from what you say, and hands mail to people by email. Nothing is sent without a tap. It learns
   who gets what; automatic hand-off is off until you switch it on in Settings, and then only for a sender you've
   handed to the same person three times. Gmail itself is never changed.
-- **Money** (PIN): import bank statements (CSV), see where it goes, drill into categories, spot subscriptions.
+- **Money** (PIN): import bank and card statements (PDF or CSV; PDFs are read on the Umbrel and shown for checking first), see where it goes, drill into categories, spot subscriptions.
   The Money model only ever sees merchant names.
 - **People** (PIN): relationships you're building and scenarios you're working toward, with notes that can't be
   rewritten, word-for-word quotes, open questions, readings with graded claims, and a research library.

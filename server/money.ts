@@ -5,6 +5,11 @@ import type { Ctx } from "./app.ts";
 import { chat, extractJson } from "./file.ts";
 import { mountLock } from "./lock.ts";
 import { saveFile, serve, deleteFile, type StoredFile } from "./files.ts";
+import { pdfLines, readStatement } from "./pdf.ts";
+
+const PDF_RULES = `You read the text of a bank or credit card statement and list its transactions.
+Reply with ONLY a JSON array of {"day":"YYYY-MM-DD","description":"as printed","amount":number}. amount is negative for money leaving (purchases, withdrawals, fees) and positive for money arriving (deposits, refunds, payments to a card).
+Leave out balances, totals and summary lines. Do not invent rows. If there are none, reply [].`;
 
 export const CATEGORIES = ["Housing", "Business", "Travel", "Food", "Subscriptions", "Transport", "Health", "Shopping", "Entertainment", "Income", "Transfers", "Other"];
 
@@ -176,7 +181,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     const file = form?.get("file");
     if (!(file instanceof File)) return c.json({ error: "Choose a statement file." }, 400);
     if (file.size > 10 * 1024 * 1024) return c.json({ error: "That file is over 10 MB." }, 400);
-    if (/\.(pdf|xlsx?|ofx|qfx|qif)$/i.test(file.name)) return c.json({ error: "Only CSV exports can be read so far. Most banks offer \"Download as CSV\" on the transactions page." }, 400);
+    if (/\.(xlsx?|ofx|qfx|qif)$/i.test(file.name)) return c.json({ error: "Only CSV and PDF statements can be read so far." }, 400);
     const account = String(form?.get("account") ?? "").trim().slice(0, 60) || null;
     const { rows, unreadable } = parseStatement(await file.text(), form?.get("flip") === "1");
     if (!rows.length) return c.json({ error: "Couldn't find any transactions in that file. It needs a date, a description and an amount on each line." }, 400);
@@ -191,6 +196,60 @@ export function mountMoney(app: Hono, ctx: Ctx) {
       }
     })();
     return c.json({ added, already_there: rows.length - added, unreadable, from: rows.reduce((a, r) => (r.day < a ? r.day : a), rows[0].day), to: rows.reduce((a, r) => (r.day > a ? r.day : a), rows[0].day) });
+  });
+
+  // Read a PDF statement and show what was found. Nothing is saved until the rows come back to /import-rows.
+  // By default this happens entirely here. The Money model only sees the statement if "model" is set, which is a button he taps.
+  app.post("/api/money/read-pdf", async (c) => {
+    const form = await c.req.formData().catch(() => null);
+    const file = form?.get("file");
+    if (!(file instanceof File)) return c.json({ error: "Choose a PDF statement." }, 400);
+    if (file.size > 20 * 1024 * 1024) return c.json({ error: "That file is over 20 MB." }, 400);
+    let lines;
+    try { lines = await pdfLines(new Uint8Array(await file.arrayBuffer())); } catch (e) { return c.json({ error: (e as Error).message }, 400); }
+    const found = readStatement(lines, ctx.day());
+    if (form?.get("model") !== "1") return c.json({ name: file.name, via: "here", can_use_model: Boolean(ctx.modelFor("money_llm")) && lines.length > 0, ...found });
+    const cfg = ctx.modelFor("money_llm");
+    if (!cfg) return c.json({ error: "Set a Money model in Settings first." }, 400);
+    const text = lines.map((l) => l.cells.map((x) => x.text).join("  ")).join("\n");
+    const rows: ParsedRow[] = [];
+    try {
+      for (let i = 0; i < text.length && i < 120_000; i += 9000) {
+        // Split on line ends so no transaction is cut in half.
+        const end = Math.min(text.length, i + 9000), cut = end === text.length ? end : text.lastIndexOf("\n", end);
+        const part = text.slice(i, cut > i ? cut : end);
+        i -= end - (cut > i ? cut : end);
+        const answer = extractJson(await chat(cfg, [{ role: "system", content: `${PDF_RULES}\nToday is ${ctx.day()}.` }, { role: "user", content: part }], 180_000));
+        for (const r of Array.isArray(answer) ? answer : []) {
+          const day = parseDate(String(r?.day ?? "")), amount = Number(r?.amount), description = String(r?.description ?? "").trim().slice(0, 200);
+          if (day && Number.isFinite(amount) && amount !== 0 && description) rows.push({ day, description, amount: Math.round(amount * 100) / 100 });
+        }
+      }
+    } catch { return c.json({ error: "The Money model didn't return anything usable for that statement." }, 502); }
+    return c.json({ name: file.name, via: "model", can_use_model: false, rows, skipped: 0, layout: "model", note: rows.length ? undefined : "The model found no transactions in it either." });
+  });
+
+  // Save rows that were read from a PDF and checked on screen.
+  app.post("/api/money/import-rows", async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as any;
+    const account = String(b.account ?? "").trim().slice(0, 60) || null;
+    const rows: ParsedRow[] = [];
+    for (const r of Array.isArray(b.rows) ? b.rows.slice(0, 5000) : []) {
+      const day = parseDate(String(r?.day ?? "")), amount = Number(r?.amount), description = String(r?.description ?? "").trim().slice(0, 200);
+      if (day && Number.isFinite(amount) && amount !== 0 && description) rows.push({ day, description, amount });
+    }
+    if (!rows.length) return c.json({ error: "There's nothing to import." }, 400);
+    let added = 0;
+    const seen = new Map<string, number>();
+    db.transaction(() => {
+      for (const r of rows) {
+        const k = `${r.day}|${r.description.toLowerCase()}|${r.amount.toFixed(2)}`;
+        const nth = seen.get(k) ?? 0;
+        seen.set(k, nth + 1);
+        if (addTx(r.day, r.description, r.amount, account, { nth })) added++;
+      }
+    })();
+    return c.json({ added, already_there: rows.length - added });
   });
 
   // One transaction by hand, or from a receipt.

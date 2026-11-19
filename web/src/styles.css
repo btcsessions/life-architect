@@ -238,3 +238,11 @@ textarea.tall { min-height: 180px; }
 .ask-reply { font-size: 16px; line-height: 1.45; white-space: pre-wrap; }
 .filed li.did { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .did-detail { white-space: pre-wrap; color: var(--label-2); background: var(--card-2); border-radius: var(--r-tile); padding: 10px 12px; overflow-wrap: anywhere; max-width: 100%; }
+
+/* PDF statement preview */
+.pdf-preview { border: 1px solid var(--electro); border-radius: var(--r-tile); padding: 14px 16px; }
+.pdf-rows { max-height: 320px; overflow: auto; border: 1px solid var(--separator); border-radius: var(--r-tile); }
+.pdf-rows table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.pdf-rows td { padding: 6px 10px; border-bottom: 1px solid var(--separator); overflow-wrap: anywhere; }
+.pdf-rows td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pdf-rows td:first-child { white-space: nowrap; }

@@ -219,12 +219,37 @@ function Assets({ s, onError }: { s: Session; onError: (m: string) => void }) {
   );
 }
 
+const exact = (n: number) => `$${n.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+interface Pdf { account?: string; name: string; via: string; can_use_model: boolean; rows: Array<{ day: string; description: string; amount: number }>; skipped: number; layout: string; note?: string; file: File }
+
 function Feed({ s, onDone, onError }: { s: Session; onDone: (message: string) => void; onError: (m: string) => void }) {
   const [account, setAccount] = useState("");
   const [flip, setFlip] = useState(false);
   const [hand, setHand] = useState(false);
   const [form, setForm] = useState({ amount: "", description: "", day: "", kind: "out" });
   const [receipt, setReceipt] = useState<File | null>(null);
+
+  const [pdfs, setPdfs] = useState<Pdf[]>([]);
+  const [reading, setReading] = useState<string | null>(null);
+  const readPdf = async (file: File, model = false) => {
+    setReading(file.name);
+    const data = new FormData();
+    data.set("file", file); if (model) data.set("model", "1");
+    try { const r = await s.call<Omit<Pdf, "file">>("/api/money/read-pdf", { method: "POST", body: data }); setPdfs((list) => [...list.filter((p) => p.name !== r.name), { ...r, file }]); }
+    catch (e) { onError(`${file.name}: ${(e as Error).message}`); }
+    finally { setReading(null); }
+  };
+  const importAll = async (files: FileList | null) => {
+    for (const f of [...(files ?? [])]) { if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") await readPdf(f); else await importFile(f); }
+  };
+  const savePdf = async (p: Pdf) => {
+    try {
+      const r = await s.call<{ added: number; already_there: number }>("/api/money/import-rows", json("POST", { rows: p.rows, account: p.account ?? account }));
+      setPdfs((list) => list.filter((x) => x !== p));
+      onDone(`${p.name}: added ${r.added} transaction${r.added === 1 ? "" : "s"}.${r.already_there ? ` ${r.already_there} were already here.` : ""}`);
+    } catch (e) { onError((e as Error).message); }
+  };
+  const change = (p: Pdf, rows: Pdf["rows"]) => setPdfs((list) => list.map((x) => (x === p ? { ...p, rows } : x)));
 
   const importFile = async (file: File | undefined) => {
     if (!file) return;
@@ -255,9 +280,40 @@ function Feed({ s, onDone, onError }: { s: Session; onDone: (message: string) =>
       </div>
       <label className="check" htmlFor="flip"><input id="flip" type="checkbox" checked={flip} onChange={(e) => setFlip(e.target.checked)} /><span>It's a credit card export where purchases show as positive numbers</span></label>
       <div className="row">
-        <label className="btn as-link upload">Import a statement (CSV)<input className="sr" type="file" accept=".csv,text/csv,text/plain" onChange={(e) => { importFile(e.target.files?.[0]); e.target.value = ""; }} /></label>
+        <label className="btn as-link upload">{reading ? `Reading ${reading}…` : "Import statements (PDF or CSV)"}<input className="sr" type="file" multiple accept=".csv,.pdf,text/csv,text/plain,application/pdf" onChange={(e) => { const f = e.target.files; importAll(f).finally(() => { e.target.value = ""; }); }} /></label>
         <button className="btn" onClick={() => setHand(!hand)}>{hand ? "Cancel" : "Add one by hand, with a receipt"}</button>
       </div>
+      {pdfs.map((p) => {
+        const out = p.rows.filter((r) => r.amount < 0).reduce((a, r) => a - r.amount, 0), inn = p.rows.filter((r) => r.amount > 0).reduce((a, r) => a + r.amount, 0);
+        const days = p.rows.map((r) => r.day).sort();
+        return (
+          <div key={p.name} className="pdf-preview stack">
+            <span className="eyebrow electro">{p.name} · read {p.via === "model" ? "by the Money model" : "on your Umbrel"}</span>
+            {p.rows.length === 0 ? <p className="accent" style={{ margin: 0 }}>{p.note ?? "No transactions found."}</p> : (
+              <>
+                <span>{p.rows.length} transaction{p.rows.length === 1 ? "" : "s"} · {days[0]} to {days[days.length - 1]} · {exact(out)} out · {exact(inn)} in{p.skipped ? ` · ${p.skipped} line${p.skipped === 1 ? "" : "s"} skipped` : ""}</span>
+                <span className="muted small">Check a few against the statement. Money out should be negative. Nothing is saved until you tap Import.</span>
+                <div className="pdf-rows">
+                  <table><tbody>
+                    {p.rows.map((r, i) => (
+                      <tr key={i}><td className="muted">{r.day}</td><td>{r.description}</td><td className={r.amount > 0 ? "num electro" : "num"}>{r.amount > 0 ? "+" : "−"}{exact(Math.abs(r.amount))}</td>
+                        <td><button className="btn ghost" aria-label={`Leave out ${r.description}`} onClick={() => change(p, p.rows.filter((_, j) => j !== i))}>✕</button></td></tr>
+                    ))}
+                  </tbody></table>
+                </div>
+              </>
+            )}
+            <div className="row">
+              {p.rows.length > 0 && <input className="plain-input" type="text" aria-label={`Account for ${p.name}`} placeholder="Account, e.g. Visa" value={p.account ?? account} onChange={(e) => setPdfs((list) => list.map((x) => (x === p ? { ...p, account: e.target.value } : x)))} />}
+              {p.rows.length > 0 && <button className="btn" onClick={() => savePdf(p)}>Import {p.rows.length}</button>}
+              {p.rows.length > 0 && <button className="btn ghost" onClick={() => change(p, p.rows.map((r) => ({ ...r, amount: -r.amount })))}>In and out are backwards: flip them</button>}
+              {p.can_use_model && <button className="btn ghost" disabled={reading !== null} onClick={() => readPdf(p.file, true)}>Looks wrong: have the Money model read it</button>}
+              <button className="btn ghost" onClick={() => setPdfs((list) => list.filter((x) => x !== p))}>Discard</button>
+            </div>
+            {p.can_use_model && <span className="muted small">The model option sends this statement's full text to your Money model. The default reading never leaves the Umbrel.</span>}
+          </div>
+        );
+      })}
       {hand && (
         <form className="form" onSubmit={addByHand}>
           <div className="fields">
