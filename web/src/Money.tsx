@@ -248,7 +248,7 @@ function Assets({ s, onError }: { s: Session; onError: (m: string) => void }) {
   if (!w) return <p className="muted">Loading…</p>;
   const act = async (fn: () => Promise<unknown>) => { setBusy(true); try { await fn(); await load(); } catch (er) { onError((er as Error).message); } finally { setBusy(false); } };
   const reset = () => { setF({ ticker: "", shares: "", currency: "", price: "", name: "", kind: "Property", value: "", owing: "", key: "" }); setAdd(null); };
-  const quoteNote = (r: { limited?: boolean; failed?: string[]; updated?: number }) => r.limited ? "The price service has hit its daily limit. Prices will fill in tomorrow, or type one in." : r.failed?.length ? `No price found for ${r.failed.join(", ")}. Check the symbol, or type the price in.` : null;
+  const quoteNote = (r: { note?: string | null; failed?: string[] }) => [r.failed?.length ? `No price found for ${r.failed.join(", ")}. Check the symbol, or type the price in with Update.` : null, r.note ?? null].filter(Boolean).join(" ") || null;
   return (
     <div className="stack">
       <div className="stats">
@@ -295,11 +295,11 @@ function Assets({ s, onError }: { s: Session; onError: (m: string) => void }) {
         <button className="btn" onClick={() => setAdd(add === "stock" ? null : "stock")}>Add a stock</button>
         <button className="btn" onClick={() => { setAdd(add === "home" ? null : "home"); setF({ ...f, kind: "Property", name: f.name || "Home" }); }}>Add a home or property</button>
         <button className="btn" onClick={() => { setAdd(add === "other" ? null : "other"); setF({ ...f, kind: "Cash", name: "" }); }}>Add something else</button>
-        {w.assets.some((a) => a.ticker) && w.has_key && <button className="btn ghost" disabled={busy} onClick={() => act(async () => { const r = await s.call<{ updated: number; limited: boolean; failed: string[] }>("/api/money/assets/refresh", { method: "POST" }); setNote(quoteNote(r) ?? `Prices updated for ${r.updated} holding${r.updated === 1 ? "" : "s"}.`); })}>{busy ? "Fetching…" : "Refresh prices"}</button>}
+        {w.assets.some((a) => a.ticker) && w.has_key && <button className="btn ghost" disabled={busy} onClick={() => act(async () => { const r = await s.call<{ updated: number; note: string | null; failed: string[] }>("/api/money/assets/refresh", { method: "POST" }); setNote([`Prices updated for ${r.updated} holding${r.updated === 1 ? "" : "s"}.`, quoteNote(r)].filter(Boolean).join(" ")); })}>{busy ? "Fetching…" : "Refresh prices"}</button>}
         <button className="btn ghost" onClick={() => setAdd(add === "key" ? null : "key")}>{w.has_key ? "Price key ✓" : "Set up stock prices"}</button>
       </div>
       {add === "stock" && (
-        <form className="form" onSubmit={(ev) => { ev.preventDefault(); act(async () => { const r = await s.call<{ priced: boolean; limited: boolean; failed: string[] }>("/api/money/assets", json("POST", { ticker: f.ticker, shares: f.shares, currency: f.currency || undefined, price: f.price || undefined })); setNote(r.priced ? "Added." : quoteNote(r) ?? (w.has_key ? "Added. The price will fill in shortly." : "Added without a price. Set up stock prices, or use Update to type one in.")); reset(); }); }}>
+        <form className="form" onSubmit={(ev) => { ev.preventDefault(); act(async () => { const r = await s.call<{ priced: boolean; note: string | null; failed: string[] }>("/api/money/assets", json("POST", { ticker: f.ticker, shares: f.shares, currency: f.currency || undefined, price: f.price || undefined })); setNote(r.priced ? "Added." : quoteNote(r) ?? (w.has_key ? "Added. The price will fill in shortly." : "Added without a price. Set up stock prices, or use Update to type one in.")); reset(); }); }}>
           <div className="fields">
             <label htmlFor="st">Ticker<input id="st" type="text" required autoCapitalize="characters" placeholder="AAPL, or SHOP.TRT for Toronto" value={f.ticker} onChange={(ev) => setF({ ...f, ticker: ev.target.value })} /></label>
             <label htmlFor="sh">Shares<input id="sh" type="text" inputMode="decimal" required value={f.shares} onChange={(ev) => setF({ ...f, shares: ev.target.value })} /></label>

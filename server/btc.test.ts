@@ -200,7 +200,10 @@ describe("what I own", () => {
       asked.push(url);
       const u = new URL(url), fn = u.searchParams.get("function"), sym = u.searchParams.get("symbol");
       let body: unknown = {};
-      if (limited) body = { Information: "rate limit" };
+      if (limited) body = { Information: "We have detected your API key and our standard API rate limit is 25 requests per day." };
+      else if (sym === "BURST" && !asked.slice(0, -1).some((x) => x.includes("BURST"))) body = { Information: "Please consider spreading out your free API requests more sparingly (1 request per second)." };
+      else if (sym === "BURST") body = { "Global Quote": { "05. price": "3.00" } };
+      else if (sym === "PAID.TRV") body = { Information: "This is a premium endpoint. Subscribe to a premium plan." };
       else if (fn === "CURRENCY_EXCHANGE_RATE") body = { "Realtime Currency Exchange Rate": { "5. Exchange Rate": "1.4000" } };
       else if (fn === "GLOBAL_QUOTE") body = { "Global Quote": sym === "AAPL" ? { "01. symbol": "AAPL", "05. price": "200.0000" } : sym === "SHOP.TRT" ? { "05. price": "150.50" } : {} };
       return new Response(JSON.stringify(body), { status: 200 });
@@ -234,10 +237,16 @@ describe("what I own", () => {
     expect(by("Home").equity).toBe(250000);
     expect(by("AAPL").value).toBe(5600);
     expect(by("NOPE").value).toBe(17.5); // typed in by hand, in USD at the stored rate
+    // "One a second" is waited out and retried; "needs a paid plan" is reported for that ticker only.
+    expect(await (await call("POST", "/api/money/assets", { ticker: "BURST", shares: 2, currency: "CAD" })).json()).toMatchObject({ priced: true });
+    const paid = await (await call("POST", "/api/money/assets", { ticker: "PAID.TRV", shares: 100 })).json();
+    expect(paid).toMatchObject({ priced: false, limited: false });
+    expect(paid.failed[0]).toContain("paid plan");
     // When the service says slow down, what's stored is kept and he's told.
     limited = true;
     const r = await (await call("POST", "/api/money/assets/refresh")).json();
     expect(r).toMatchObject({ limited: true, updated: 0 });
+    expect(r.note).toContain("limit for today");
     expect(r.assets.find((a: any) => a.name === "AAPL").value).toBe(5600);
   });
 });

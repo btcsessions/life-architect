@@ -550,7 +550,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
   });
 
   // ---- What you own: stocks by ticker, property with what's still owing, and anything else by hand.
-  for (const [col, type] of [["owing", "REAL NOT NULL DEFAULT 0"], ["ticker", "TEXT"], ["shares", "REAL"], ["currency", "TEXT"], ["price", "REAL"], ["price_day", "TEXT"], ["fx", "REAL"]] as const)
+  for (const [col, type] of [["owing", "REAL NOT NULL DEFAULT 0"], ["ticker", "TEXT"], ["shares", "REAL"], ["currency", "TEXT"], ["price", "REAL"], ["price_day", "TEXT"], ["fx", "REAL"], ["tried_day", "TEXT"]] as const)
     if (!(db.prepare("PRAGMA table_info(money_assets)").all() as Array<{ name: string }>).some((c) => c.name === col)) db.exec(`ALTER TABLE money_assets ADD COLUMN ${col} ${type}`);
   const num = (v: unknown) => (v === null || v === undefined || v === "" ? null : parseAmount(String(v)));
   const guessCurrency = (ticker: string) => (/\.(TRT|TO|TRV|V|NE|CN)$/i.test(ticker) ? "CAD" : "USD");
@@ -558,27 +558,51 @@ export function mountMoney(app: Hono, ctx: Ctx) {
   const av = async (params: string) => {
     const r = await fetch(`https://www.alphavantage.co/query?${params}&apikey=${encodeURIComponent(quoteKey())}`, { signal: AbortSignal.timeout(30_000) });
     const j = (await r.json()) as Record<string, any>;
-    if (j.Note || j.Information) throw new Error("limit");
-    return j;
+    const said = String(j.Note ?? j.Information ?? j["Error Message"] ?? "");
+    return { j, said };
   };
-  let refreshing: Promise<{ updated: number; failed: string[]; limited: boolean }> | null = null;
+  // The free key allows one request a second and a small number a day, and answers with a sentence rather than an
+  // error code when either is exceeded, or when something needs a paid plan. Tell those apart.
+  const pause = (ms: number) => (process.env.VITEST ? Promise.resolve() : new Promise((ok) => setTimeout(ok, ms)));
+  let lastAsk = 0;
+  async function ask(params: string): Promise<{ j: Record<string, any>; problem: null | "daily" | "premium" | "key" | "other"; said: string }> {
+    for (let attempt = 0; ; attempt++) {
+      await pause(Math.max(0, 1300 - (Date.now() - lastAsk)));
+      const { j, said } = await av(params);
+      lastAsk = Date.now();
+      if (!said) return { j, problem: null, said };
+      if (/per second|spread out|sparingly/i.test(said) && !/per day|daily/i.test(said) && attempt < 2) { await pause(2500); continue; }
+      return { j, said, problem: /per day|daily|25 requests/i.test(said) ? "daily" : /premium/i.test(said) ? "premium" : /apikey|api key/i.test(said) ? "key" : "other" };
+    }
+  }
+  let refreshing: Promise<{ updated: number; failed: string[]; limited: boolean; note: string | null }> | null = null;
   /** Fetch the latest price for each ticker and re-value the holdings in CAD. Only ticker symbols are sent. */
   async function refreshQuotes(force = false) {
-    const out = { updated: 0, failed: [] as string[], limited: false };
+    const out = { updated: 0, failed: [] as string[], limited: false, note: null as string | null };
     const stocks = db.prepare("SELECT * FROM money_assets WHERE ticker IS NOT NULL").all() as any[];
     if (!quoteKey() || !stocks.length) return out;
-    const due = [...new Set(stocks.filter((a) => force || a.price_day !== ctx.day()).map((a) => a.ticker as string))];
+    // Each ticker is asked about once a day at most (lookups are scarce), unless he taps Refresh.
+    const due = [...new Set(stocks.filter((a) => force || (a.price_day !== ctx.day() && a.tried_day !== ctx.day())).map((a) => a.ticker as string))];
     let usdcad: number | null = null;
+    const stop = (r: { problem: string | null; said: string }) => {
+      if (r.problem === "daily") { out.limited = true; out.note = "The price service has reached its limit for today on this key. Prices will fill in tomorrow, or type one in."; return true; }
+      if (r.problem === "key") { out.note = "The price service didn't accept that key. Check it under Price key."; return true; }
+      return false;
+    };
     try {
-      if (due.length && stocks.some((a) => a.currency === "USD")) {
-        const fx = await av("function=CURRENCY_EXCHANGE_RATE&from_currency=USD&to_currency=CAD");
-        const rate = Number(Object.entries(fx["Realtime Currency Exchange Rate"] ?? {}).find(([k]) => /exchange rate/i.test(k))?.[1]);
+      if (due.length && stocks.some((a) => a.currency === "USD" && due.includes(a.ticker))) {
+        const fx = await ask("function=CURRENCY_EXCHANGE_RATE&from_currency=USD&to_currency=CAD");
+        if (stop(fx)) return out;
+        const rate = Number(Object.entries(fx.j["Realtime Currency Exchange Rate"] ?? {}).find(([k]) => /exchange rate/i.test(k))?.[1]);
         if (rate > 0) usdcad = rate;
       }
       for (const t of due) {
-        const q = (await av(`function=GLOBAL_QUOTE&symbol=${encodeURIComponent(t)}`))["Global Quote"] ?? {};
+        const r = await ask(`function=GLOBAL_QUOTE&symbol=${encodeURIComponent(t)}`);
+        if (stop(r)) return out;
+        db.prepare("UPDATE money_assets SET tried_day = ? WHERE ticker = ?").run(ctx.day(), t);
+        const q = r.j["Global Quote"] ?? {};
         const price = Number(Object.entries(q).find(([k]) => /price/i.test(k))?.[1]);
-        if (!(price > 0)) { out.failed.push(t); continue; }
+        if (!(price > 0)) { out.failed.push(r.problem === "premium" ? `${t} (needs a paid plan there)` : t); if (r.problem === "other" && !out.note) out.note = `The price service said: "${r.said.slice(0, 160)}"`; continue; }
         for (const a of stocks.filter((x) => x.ticker === t)) {
           const fx = a.currency === "USD" ? usdcad ?? a.fx ?? null : 1;
           if (!fx) { out.failed.push(t); continue; }
@@ -586,7 +610,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
           out.updated++;
         }
       }
-    } catch (e) { if ((e as Error).message === "limit") out.limited = true; else out.failed.push("the price service couldn't be reached"); }
+    } catch { out.note = "The price service couldn't be reached."; }
     return out;
   }
   const assetView = () => {
@@ -600,7 +624,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
   };
   app.get("/api/money/assets", (c) => {
     // Prices are refreshed once a day in the background; the page shows what's stored meanwhile.
-    if (quoteKey() && !refreshing && db.prepare("SELECT 1 FROM money_assets WHERE ticker IS NOT NULL AND (price_day IS NULL OR price_day != ?)").get(ctx.day()) && !process.env.VITEST) refreshing = refreshQuotes().finally(() => { refreshing = null; });
+    if (quoteKey() && !refreshing && db.prepare("SELECT 1 FROM money_assets WHERE ticker IS NOT NULL AND (price_day IS NULL OR price_day != ?) AND (tried_day IS NULL OR tried_day != ?)").get(ctx.day(), ctx.day()) && !process.env.VITEST) refreshing = refreshQuotes().finally(() => { refreshing = null; });
     return c.json(assetView());
   });
   app.put("/api/money/assets/quote-key", async (c) => {
@@ -623,7 +647,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
       db.prepare("INSERT INTO money_assets (name, kind, value, updated_at, ticker, shares, currency, price, fx) VALUES (?, 'Stock', ?, ?, ?, ?, ?, ?, ?)")
         .run((typeof b.name === "string" && b.name.trim() ? b.name.trim() : ticker).slice(0, 80), price ? Math.round(shares * price * fx * 100) / 100 : 0, ctx.day(), ticker, shares, currency, price, fx);
       const got = quoteKey() ? await refreshQuotes() : null;
-      return c.json({ ok: true, priced: Boolean(price) || Boolean(got?.updated), limited: got?.limited ?? false, failed: got?.failed ?? [] });
+      return c.json({ ok: true, priced: Boolean(price) || Boolean(got?.updated), limited: got?.limited ?? false, failed: got?.failed ?? [], note: got?.note ?? null });
     }
     const value = num(b.value), owing = num(b.owing) ?? 0;
     if (typeof b.name !== "string" || !b.name.trim()) return c.json({ error: "Give it a name." }, 400);
