@@ -149,9 +149,28 @@ function SettingsPanel({ onClose, onSaved }: { onClose: () => void; onSaved: () 
   const [form, setForm] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [models, setModels] = useState<string[] | null>(null);
+  const [typeIt, setTypeIt] = useState(false);
+
+  const findModels = async (url: string, key?: string) => {
+    if (!url.trim()) return;
+    setBusy(true);
+    try {
+      const r = await api.models({ llm_url: url, ...(key ? { llm_key: key } : {}) });
+      setModels(r.ok ? r.models : null);
+      setTypeIt(false);
+      setMsg({ ok: r.ok, text: r.message });
+      // One model on offer: pick it.
+      if (r.ok && r.models.length === 1) setForm((f) => ({ ...f, llm_model: r.models[0] }));
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
-    api.settings().then(setS).catch((e) => setMsg({ ok: false, text: (e as Error).message }));
+    api.settings().then((v) => { setS(v); if (v.llm_url) findModels(v.llm_url); }).catch((e) => setMsg({ ok: false, text: (e as Error).message }));
   }, []);
 
   const set = (k: string) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
@@ -187,14 +206,26 @@ function SettingsPanel({ onClose, onSaved }: { onClose: () => void; onSaved: () 
         <p className="muted small">Any OpenAI-style address, such as Hermes on this Umbrel. Leave empty to file by simple rules.</p>
         <div className="fields">
           <label htmlFor="llm_url">Address
-            <input id="llm_url" type="url" inputMode="url" placeholder="http://…:8642/v1" value={val("llm_url")} onChange={set("llm_url")} />
+            <input id="llm_url" type="url" inputMode="url" placeholder="http://…:8642/v1" value={val("llm_url")} onChange={set("llm_url")} onBlur={(e) => { if (e.target.value.trim() && e.target.value !== s.llm_url) findModels(e.target.value, form.llm_key); }} />
           </label>
-          <label htmlFor="llm_model">Model name
-            <input id="llm_model" type="text" autoCapitalize="off" value={val("llm_model")} onChange={set("llm_model")} />
-          </label>
-          <label htmlFor="llm_key">Key
+          <label htmlFor="llm_key">Key, if it needs one
             <input id="llm_key" type="password" autoComplete="off" placeholder={s.llm_key_set ? "Saved. Type to replace" : "None saved"} value={form.llm_key ?? ""} onChange={set("llm_key")} />
           </label>
+          <label htmlFor="llm_model">Model
+            {models && !typeIt ? (
+              <select id="llm_model" value={val("llm_model")} onChange={set("llm_model")}>
+                <option value="">Choose a model…</option>
+                {val("llm_model") && !models.includes(val("llm_model")) && <option value={val("llm_model")}>{val("llm_model")}</option>}
+                {models.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            ) : (
+              <input id="llm_model" type="text" autoCapitalize="off" placeholder="Find models, or type the name" value={val("llm_model")} onChange={set("llm_model")} />
+            )}
+          </label>
+        </div>
+        <div className="row">
+          <button className="btn" type="button" disabled={busy || !val("llm_url").trim()} onClick={() => findModels(val("llm_url"), form.llm_key)}>Find models</button>
+          {models && <button className="btn ghost" type="button" onClick={() => setTypeIt(!typeIt)}>{typeIt ? "Pick from the list" : "Type it instead"}</button>}
         </div>
       </fieldset>
 

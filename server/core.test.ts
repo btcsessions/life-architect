@@ -173,3 +173,27 @@ describe("api", () => {
     expect((await app.request("/api/transcribe", { method: "POST" })).status).toBe(501);
   });
 });
+
+describe("model list", () => {
+  it("lists models from the address being typed, and explains failures", async () => {
+    const app = createApp(openDb(":memory:"));
+    const ask = async (body: unknown) =>
+      (await app.request("/api/settings/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+    const real = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: any, init: any) => {
+        expect(String(url)).toBe("http://m/v1/models");
+        expect(init.headers.authorization).toBe("Bearer k");
+        return new Response(JSON.stringify({ data: [{ id: "b-model" }, { id: "a-model" }, { id: "a-model" }] }));
+      }) as typeof fetch;
+      expect(await ask({ llm_url: "http://m/v1/", llm_key: "k" })).toMatchObject({ ok: true, models: ["a-model", "b-model"] });
+      globalThis.fetch = (async () => new Response("", { status: 401 })) as typeof fetch;
+      expect((await ask({ llm_url: "http://m/v1" })).message).toMatch(/wants a key/);
+      globalThis.fetch = (async () => new Response("", { status: 404 })) as typeof fetch;
+      expect((await ask({ llm_url: "http://m" })).message).toMatch(/\/v1/);
+      expect(await ask({})).toMatchObject({ ok: false, message: "Enter the address first." });
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});

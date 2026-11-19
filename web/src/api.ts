@@ -44,6 +44,8 @@ export const api = {
   remove: (id: number) => call<{ ok: true }>(`/api/tasks/${id}`, { method: "DELETE" }),
   settings: () => call<Settings>("/api/settings"),
   saveSettings: (body: Record<string, string>) => call<Settings>("/api/settings", json("PUT", body)),
+  models: (body: Record<string, string>) =>
+    call<{ ok: boolean; models: string[]; message: string }>("/api/settings/models", json("POST", body)),
   testModel: () => call<{ ok: boolean; message: string }>("/api/settings/test", { method: "POST" }),
   transcribe: (audio: Blob) => {
     const form = new FormData();

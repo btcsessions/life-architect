@@ -63,6 +63,34 @@ export function createApp(db: Db, now: () => Date = () => new Date()) {
     return c.json(settingsView());
   });
 
+  // List the models an address offers, so the name can be picked instead of typed.
+  // Uses the address and key being typed if given, otherwise the saved ones.
+  app.post("/api/settings/models", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const url = (typeof body.llm_url === "string" && body.llm_url.trim() ? body.llm_url.trim() : setting("llm_url")).replace(/\/$/, "");
+    const key = typeof body.llm_key === "string" && body.llm_key.trim() ? body.llm_key.trim() : setting("llm_key");
+    if (!/^https?:\/\/\S+$/.test(url)) return c.json({ ok: false, models: [], message: "Enter the address first." });
+    try {
+      const res = await fetch(`${url}/models`, {
+        headers: key ? { authorization: `Bearer ${key}` } : {},
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.status === 401 || res.status === 403)
+        return c.json({ ok: false, models: [], message: "It answered, but wants a key before listing models. Enter the key and try again." });
+      if (res.status === 404)
+        return c.json({ ok: false, models: [], message: "Reached the server, but it has no model list at that address. It usually ends in /v1." });
+      if (!res.ok) return c.json({ ok: false, models: [], message: `It answered with an error (${res.status}).` });
+      const data: any = await res.json().catch(() => null);
+      const list: unknown[] = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+      const models = [...new Set(list.map((m: any) => (typeof m === "string" ? m : m?.id ?? m?.name)).filter((m) => typeof m === "string" && m))].sort() as string[];
+      if (!models.length) return c.json({ ok: false, models: [], message: "It answered, but listed no models. Type the name instead." });
+      return c.json({ ok: true, models, message: `Found ${models.length} model${models.length === 1 ? "" : "s"}.` });
+    } catch (err) {
+      const e = err as Error;
+      return c.json({ ok: false, models: [], message: e.name === "TimeoutError" ? "No answer within 15 seconds." : `Couldn't reach it: ${e.message}.` });
+    }
+  });
+
   // One tiny request, so a wrong address or key is found here and not on the next quick-add.
   app.post("/api/settings/test", async (c) => {
     const m = model();
