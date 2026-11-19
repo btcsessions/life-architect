@@ -162,14 +162,14 @@ function Dig({ title, total, open, onToggle, children }: { title: string; total:
 }
 
 function Transactions({ s, month, category, onChanged, onError }: { s: Session; month: string; category: string | null; onChanged: () => void; onError: (m: string) => void }) {
-  const [data, setData] = useState<{ tx: Tx[]; categories: string[]; custom: string[]; accounts: Array<{ account: string; n: number }> } | null>(null);
+  const [data, setData] = useState<{ tx: Tx[]; categories: string[]; custom: string[]; accounts: Array<{ account: string; n: number; wallet: number }> } | null>(null);
   const [labelling, setLabelling] = useState<number | null>(null);
   const [label, setLabel] = useState("");
   const [type, setType] = useState("");
   const [flipAcct, setFlipAcct] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [types, setTypes] = useState(false);
-  const load = useCallback(() => s.call<{ tx: Tx[]; categories: string[]; custom: string[]; accounts: Array<{ account: string; n: number }> }>(`/api/money/tx?month=${month}${category ? `&category=${encodeURIComponent(category)}` : ""}`).then(setData).catch((e) => onError(e.message)), [s, month, category, onError]);
+  const load = useCallback(() => s.call<{ tx: Tx[]; categories: string[]; custom: string[]; accounts: Array<{ account: string; n: number; wallet: number }> }>(`/api/money/tx?month=${month}${category ? `&category=${encodeURIComponent(category)}` : ""}`).then(setData).catch((e) => onError(e.message)), [s, month, category, onError]);
   useEffect(() => { load(); }, [load]);
   if (!data) return <p className="muted">Loading…</p>;
   const resort = async (t: Tx, cat: string) => {
@@ -211,6 +211,11 @@ function Transactions({ s, month, category, onChanged, onError }: { s: Session; 
               ) : (
                 <span className="row" style={{ gap: 14 }}>
                   <button className="linkish small" onClick={() => { setLabelling(t.id); setLabel(t.note ?? ""); }}>{t.note ? "Change label" : "Add a label"}</button>
+                  {t.amount < 0 && !t.pair && data.accounts.some((a) => !a.wallet && a.account !== t.account) && (
+                    <select className="inline small" aria-label={`What ${t.note || t.merchant} paid off`} value="" onChange={(e) => { const account = e.target.value; if (!account) return; s.call<{ matched: { day: string; amount: number } | null }>(`/api/money/tx/${t.id}/paid`, json("POST", { account })).then((r) => { setMsg(r.matched ? `Counted as paying off ${account}, matched to its ${r.matched.day} payment of $${r.matched.amount.toFixed(2)}. It's no longer spending.` : `Counted as paying off ${account}. It's no longer spending. It'll link to the payment line when that statement is imported.`); load(); onChanged(); }).catch((er) => onError(er.message)); }}>
+                      <option value="">This paid off…</option>{data.accounts.filter((a) => !a.wallet && a.account !== t.account).map((a) => <option key={a.account} value={a.account}>{a.account}</option>)}
+                    </select>
+                  )}
                   {t.sats === null && <button className="linkish small" onClick={() => s.call(`/api/money/tx/${t.id}`, json("PATCH", { flip: true })).then(() => { load(); onChanged(); }).catch((e) => onError(e.message))}>{t.amount > 0 ? "This was a charge, not money in" : "This was money in, not a charge"}</button>}
                 </span>
               )}

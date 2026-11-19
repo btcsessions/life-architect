@@ -118,15 +118,37 @@ describe("bitcoin wallets in Money", () => {
     ]);
     expect(april[0].pair.account).toBeTruthy();
     expect((await month("2026-05"))[0]).toMatchObject({ description: "Bitcoin sent", amount: -120.6, category: "Other" });
+    // A card statement arrives with a payment for nearly the same dollars two days later: matched without being asked.
+    const amex = new FormData(); amex.set("file", new File(["Date,Description,Amount\n2026-05-22,PAYMENT RECEIVED - THANK YOU,121.00"], "a.csv")); amex.set("account", "Amex");
+    expect((await (await app.request("/api/money/import", { method: "POST", headers: { cookie }, body: amex })).json()).transfers).toBe(1);
+    const btcSend = async () => (await month("2026-05")).find((t: any) => t.description === "Bitcoin sent");
+    expect(await btcSend()).toMatchObject({ category: "Transfers", pair: { account: "Amex" } });
     // The move doesn't count as income or spending.
     const s = await (await call("GET", "/api/money/summary?month=2026-04")).json();
     expect([s.in, s.out]).toEqual([0, 0]);
 
     // A label and a category he sets survive the next sync, and nothing is doubled.
-    const sent = (await month("2026-05"))[0];
+    const sent = await btcSend();
     await call("PATCH", `/api/money/tx/${sent.id}`, { category: "Business", note: "Camera lens from the shop" });
     expect(await (await call("POST", "/api/money/btc/sync")).json()).toMatchObject({ transactions: 0 });
-    expect((await month("2026-05"))[0]).toMatchObject({ category: "Business", note: "Camera lens from the shop" });
+    expect(await btcSend()).toMatchObject({ category: "Business", note: "Camera lens from the shop", pair: null }); // and saying it wasn't a transfer splits the pair
+
+    // Bitcoin that paid off a card is a transfer, not spending. The card's payment line is a little different in
+    // dollars (conversion), and is found automatically when it reads like a payment.
+    const visa = new FormData(); visa.set("file", new File(["Date,Description,Amount\n2026-05-21,PAYMENT - THANK YOU,118.00\n2026-05-22,CAMERA STORE,-300"], "v.csv")); visa.set("account", "Visa");
+    await app.request("/api/money/tx/" + sent.id, { method: "PATCH", headers: { ...J, cookie }, body: JSON.stringify({ category: "Other" }) });
+    const before = await (await call("GET", "/api/money/summary?month=2026-05")).json();
+    expect(before.out).toBeCloseTo(120.6);
+    await app.request("/api/money/import", { method: "POST", headers: { cookie }, body: visa });
+    let may = await month("2026-05");
+    expect(may.find((t: any) => t.description === "Bitcoin sent").pair).toBeNull(); // he'd set its type himself, so it's left alone
+    const paid = await (await call("POST", `/api/money/tx/${sent.id}/paid`, { account: "Visa" })).json();
+    expect(paid.matched).toMatchObject({ day: "2026-05-21", amount: 118 });
+    may = await month("2026-05");
+    expect(may.find((t: any) => t.description === "Bitcoin sent")).toMatchObject({ category: "Transfers", pair: { account: "Visa" } });
+    const after = await (await call("GET", "/api/money/summary?month=2026-05")).json();
+    expect(after.out).toBe(300); // only the camera store is spending now
+    expect(after.in).toBe(0);
 
     // Addresses only ever went to the address server; the price source saw no address.
     expect(asked.filter((u) => u.includes("/address/")).every((u) => u.startsWith("http://mempool.local:3006/"))).toBe(true);

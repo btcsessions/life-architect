@@ -8,6 +8,7 @@ import { saveFile, serve, deleteFile, type StoredFile } from "./files.ts";
 import { pdfLines, readStatement } from "./pdf.ts";
 import { mountBtc } from "./btc.ts";
 
+const CARD_PAYMENT = /payment|pymt|pmt|thank you|paiement|merci/i;
 // Words that suggest a line is money moving between your own accounts rather than being earned or spent.
 const TRANSFERISH = /transfer|tfr|xfer|payment|pymt|pmt|thank you|visa|mastercard|master card|amex|credit card|savings|chequing|checking|to acct|from acct|online banking|bill pay/i;
 
@@ -28,7 +29,7 @@ const DEFAULT_RULES: Array<[RegExp, string]> = [
   [/\b(cineplex|steam|playstation|nintendo|xbox|ticketmaster|concert|theatre|bowling)\b/i, "Entertainment"],
   [/\b(amazon|amzn|best buy|ikea|home depot|canadian tire|apple store|winners|lululemon)\b/i, "Shopping"],
   [/\b(payroll|direct deposit|adsense|google ads?ense|youtube.*(payment|earnings)|stripe|paypal transfer|e-?transfer (received|from)|interac.*(received|from)|refund|interest paid)\b/i, "Income"],
-  [/\b(transfer to|transfer from|tfr|payment - thank you|payment thank you|credit card payment|e-?transfer (sent|to))\b/i, "Transfers"],
+  [/\b(transfer to|transfer from|tfr|payment.{0,20}thank you|payment received|paiement.{0,12}merci|credit card payment|e-?transfer (sent|to))\b/i, "Transfers"],
 ];
 
 export interface Tx { id: number; day: string; description: string; merchant: string; amount: number; account: string | null; category: string; note: string | null; file_id: number | null }
@@ -159,7 +160,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     CREATE TABLE IF NOT EXISTS money_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, merchant TEXT NOT NULL UNIQUE, category TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS money_assets (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, kind TEXT NOT NULL, value REAL NOT NULL, updated_at TEXT NOT NULL);
   `);
-  for (const [col, type] of [["pair_id", "INTEGER"], ["sats", "INTEGER"], ["txid", "TEXT"], ["wallet_id", "INTEGER"], ["keep_cat", "INTEGER NOT NULL DEFAULT 0"]] as const)
+  for (const [col, type] of [["paid_account", "TEXT"], ["pair_id", "INTEGER"], ["sats", "INTEGER"], ["txid", "TEXT"], ["wallet_id", "INTEGER"], ["keep_cat", "INTEGER NOT NULL DEFAULT 0"]] as const)
     if (!(db.prepare("PRAGMA table_info(money_tx)").all() as Array<{ name: string }>).some((c) => c.name === col)) db.exec(`ALTER TABLE money_tx ADD COLUMN ${col} ${type}`);
   mountLock(app, ctx, "money");
 
@@ -185,9 +186,40 @@ export function mountMoney(app: Hono, ctx: Ctx) {
         db.prepare("UPDATE money_tx SET category = 'Transfers', pair_id = ? WHERE id = ?").run(out.id, match.id);
         made++;
       }
+      // Bitcoin that paid off a card or a bill: the dollar amounts differ a little (conversion and fees), so the
+      // match is looser. Either he said which account it paid, or the other side reads like a card payment.
+      const pair = (a: number, b: number) => { db.prepare("UPDATE money_tx SET category = 'Transfers', pair_id = ? WHERE id = ?").run(b, a); db.prepare("UPDATE money_tx SET category = 'Transfers', pair_id = ? WHERE id = ?").run(a, b); };
+      const sends = db.prepare("SELECT * FROM money_tx WHERE wallet_id IS NOT NULL AND amount < 0 AND pair_id IS NULL AND (paid_account IS NOT NULL OR (keep_cat = 0 AND category != 'Transfers')) ORDER BY day, id").all() as Array<Tx & { paid_account: string | null }>;
+      for (const out of sends) {
+        const told = out.paid_account, loose = told ? 0.1 : 0.03, days = told ? 7 : 5;
+        const match = (db.prepare("SELECT * FROM money_tx WHERE wallet_id IS NULL AND amount > 0 AND pair_id IS NULL AND account IS NOT NULL").all() as Tx[])
+          .filter((i) => !taken.has(i.id) && gap(i.day, out.day) <= days && Math.abs(i.amount + out.amount) <= Math.abs(out.amount) * loose)
+          .filter((i) => (told ? i.account === told : CARD_PAYMENT.test(i.description) && !(i as any).keep_cat))
+          .sort((a, b) => Math.abs(a.amount + out.amount) - Math.abs(b.amount + out.amount))[0];
+        if (!match) continue;
+        taken.add(match.id);
+        pair(out.id, match.id);
+        made++;
+      }
     })();
     return made;
   }
+
+  // "This bitcoin payment paid off my Visa." It becomes a transfer, not spending, and is tied to the card's
+  // payment line when the statement has it (now, or whenever that statement is imported).
+  app.post("/api/money/tx/:id/paid", async (c) => {
+    const t = db.prepare("SELECT * FROM money_tx WHERE id = ?").get(Number(c.req.param("id"))) as (Tx & { pair_id: number | null }) | undefined;
+    if (!t) return c.json({ error: "That transaction is gone." }, 404);
+    if (t.amount >= 0) return c.json({ error: "Only money going out can pay something off." }, 400);
+    const account = String(((await c.req.json().catch(() => ({}))) as any).account ?? "").trim().slice(0, 60);
+    if (!account) return c.json({ error: "Pick the account it paid off." }, 400);
+    if (t.pair_id) db.prepare("UPDATE money_tx SET pair_id = NULL WHERE id IN (?, ?)").run(t.id, t.pair_id);
+    db.prepare("UPDATE money_tx SET category = 'Transfers', keep_cat = 1, paid_account = ?, note = coalesce(note, ?) WHERE id = ?").run(account, `Paid off ${account}`, t.id);
+    linkTransfers();
+    const after = db.prepare("SELECT pair_id FROM money_tx WHERE id = ?").get(t.id) as { pair_id: number | null };
+    const other = after.pair_id ? (db.prepare("SELECT day, amount, description FROM money_tx WHERE id = ?").get(after.pair_id) as any) : null;
+    return c.json({ ok: true, matched: other });
+  });
 
   // His own transaction types, on top of the built-in ones. Income, Transfers and Other stay last.
   db.exec("CREATE TABLE IF NOT EXISTS money_cats (name TEXT PRIMARY KEY COLLATE NOCASE, created_at TEXT NOT NULL)");
@@ -225,7 +257,12 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     const total = (db.prepare("SELECT count(*) AS n FROM money_tx WHERE pair_id IS NOT NULL AND amount < 0").get() as { n: number }).n;
     return c.json({ pairs, total, unnamed });
   });
-  try { linkTransfers(); } catch { /* first run on an empty table */ }
+  try {
+    // Card payments that an older version filed as income are money moving, not money earned.
+    for (const t of db.prepare("SELECT id, description FROM money_tx WHERE category = 'Income' AND keep_cat = 0 AND wallet_id IS NULL").all() as Array<{ id: number; description: string }>)
+      if (/\b(payment.{0,20}thank you|payment received|paiement.{0,12}merci)\b/i.test(t.description)) db.prepare("UPDATE money_tx SET category = 'Transfers' WHERE id = ?").run(t.id);
+    linkTransfers();
+  } catch { /* first run on an empty table */ }
 
   const categorise = (description: string, merchant: string, amount: number): string => {
     const own = db.prepare("SELECT category FROM money_rules WHERE merchant = ?").get(merchant.toLowerCase()) as { category: string } | undefined;
@@ -424,7 +461,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     return c.json({ categories: cats(), custom: custom(), accounts: accounts(), tx });
   });
 
-  const accounts = () => (db.prepare("SELECT account, count(*) AS n, min(day) AS first, max(day) AS last FROM money_tx WHERE account IS NOT NULL GROUP BY account ORDER BY account").all() as Array<{ account: string }>);
+  const accounts = () => (db.prepare("SELECT account, count(*) AS n, min(day) AS first, max(day) AS last, max(wallet_id IS NOT NULL) AS wallet FROM money_tx WHERE account IS NOT NULL GROUP BY account ORDER BY account").all() as Array<{ account: string }>);
 
   /**
    * Turn charges that were read as money in (or the reverse) the right way round. The import fingerprint is left
@@ -464,7 +501,7 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     if (b.category === undefined && typeof b.note === "string") return c.json({ ok: true });
     if (!cats().includes(b.category as string)) return c.json({ error: "Pick a category." }, 400);
     // His choice sticks: automatic matching won't change it back, and a wrongly matched pair is split.
-    db.prepare("UPDATE money_tx SET keep_cat = 1 WHERE id = ?").run(id);
+    db.prepare("UPDATE money_tx SET keep_cat = 1, paid_account = CASE WHEN ? = 'Transfers' THEN paid_account ELSE NULL END WHERE id = ?").run(b.category as string, id);
     const pair = (t as any).pair_id as number | null;
     if (pair && b.category !== "Transfers") {
       db.prepare("UPDATE money_tx SET pair_id = NULL WHERE id IN (?, ?)").run(id, pair);
