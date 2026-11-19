@@ -229,3 +229,10 @@ textarea.tall { min-height: 180px; }
 .noticed { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .noticed-item { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border: 1px dashed var(--electro); border-radius: var(--r-tile); }
 .noticed-item .grow { min-width: 200px; }
+
+/* Handed to the assistant */
+.asks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.ask { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; background: var(--card); border: 1px solid var(--electro); border-radius: var(--r-tile); overflow-wrap: anywhere; }
+.ask.working { border-style: dashed; }
+.ask-text { color: var(--label-2); }
+.ask-reply { font-size: 16px; line-height: 1.45; white-space: pre-wrap; }

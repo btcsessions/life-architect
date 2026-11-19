@@ -237,6 +237,18 @@ export function mountMail(app: Hono, ctx: Ctx, factory: MailFactory = gmail) {
     return c.json({ sent: true });
   });
 
+  // A task of your own about this email, in your words. The email stays where it is.
+  app.post("/api/inbox/:id/task", async (c) => {
+    const m = get(Number(c.req.param("id")));
+    if (!m) return bad(c, "No such message.", 404);
+    const text = String(((await c.req.json().catch(() => ({}))) as any).text ?? "").trim();
+    if (!text) return bad(c, "Say what the task is first.");
+    const r = await ctx.capture(text, "inbox", { tasksOnly: true });
+    const about = `About the email from ${m.from_name}: ${m.subject}`;
+    for (const t of r.created) db.prepare("UPDATE tasks SET note = ? WHERE id = ?").run([t.note, about].filter(Boolean).join(" · ").slice(0, 500), t.id);
+    return c.json({ created: r.created.map((t) => ({ title: t.title, area_name: t.area_name })) });
+  });
+
   // Move it, or clear it without sending anything.
   app.patch("/api/inbox/:id", async (c) => {
     const m = get(Number(c.req.param("id")));

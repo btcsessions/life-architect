@@ -77,7 +77,9 @@ export function Inbox({ onBack, onError, stt }: Props) {
 
 function Row({ m, open, onToggle, people, stt, hasModel, onError, onDone }: { m: Mail; open: boolean; onToggle: () => void; people: Person[]; stt: boolean; hasModel: boolean; onError: (m: string) => void; onDone: (note: string) => void }) {
   const [body, setBody] = useState<string | null>(null);
-  const [mode, setMode] = useState<null | "reply" | "handoff">(null);
+  const [mode, setMode] = useState<null | "reply" | "handoff" | "task" | "ask">(null);
+  const [todo, setTodo] = useState("");
+  const dt = useDictation(stt, (t) => setTodo((x) => (x ? x + " " : "") + t), onError);
   const [say, setSay] = useState("");
   const [draft, setDraft] = useState<string | null>(null);
   const [cc, setCc] = useState("");
@@ -108,7 +110,8 @@ function Row({ m, open, onToggle, people, stt, hasModel, onError, onDone }: { m:
             <div className="row">
               <button className="btn" onClick={() => setMode("reply")}>Reply</button>
               <button className="btn" onClick={() => setMode("handoff")}>Hand off</button>
-              <button className="btn ghost" disabled={busy} onClick={() => run(() => call(`/api/inbox/${m.id}`, json("PATCH", { task: true, done: true })), "Added to your deck.")}>Add to deck</button>
+              <button className="btn" onClick={() => { setTodo(""); setMode("task"); }}>Task for me</button>
+              <button className="btn" onClick={() => { setTodo(""); setMode("ask"); }}>Have Hermes do it</button>
               <button className="btn ghost" disabled={busy} onClick={() => run(() => call(`/api/inbox/${m.id}`, json("PATCH", { done: true })), "Cleared.")}>Clear</button>
             </div>
           )}
@@ -138,6 +141,22 @@ function Row({ m, open, onToggle, people, stt, hasModel, onError, onDone }: { m:
                   </div>
                 </>
               )}
+            </div>
+          )}
+          {(mode === "task" || mode === "ask") && (
+            <div className="form">
+              <label htmlFor={`td${m.id}`} className="eyebrow">{mode === "task" ? "What do you need to do about this?" : "What should Hermes do with this email?"}</label>
+              <div className="row" style={{ alignItems: "flex-start" }}>
+                <textarea id={`td${m.id}`} className="plain grow" placeholder={dt.recording ? `Listening… ${dt.clock}` : dt.busy ? "Writing it down…" : mode === "task" ? "e.g. Sign the contract by Friday, important" : "e.g. Make a note of the affiliate details for a later tutorial"} value={todo} onChange={(e) => setTodo(e.target.value)} />
+                <MicButton d={dt} small />
+              </div>
+              <p className="muted small" style={{ margin: 0 }}>{mode === "task" ? "It goes on your deck with a note saying which email it's about. The email stays here." : "Hermes gets your instruction and this email. Its answer shows at the top of your deck."}</p>
+              <div className="row">
+                {mode === "task"
+                  ? <button className="btn" disabled={busy || !todo.trim()} onClick={() => run(() => call(`/api/inbox/${m.id}/task`, json("POST", { text: todo })), "Task added to your deck.")}>Add task</button>
+                  : <button className="btn" disabled={busy || !todo.trim()} onClick={() => run(() => call("/api/asks", json("POST", { text: todo, mail_id: m.id })), "Handed to Hermes. The answer will be on your deck.")}>Hand to Hermes</button>}
+                <button className="btn ghost" onClick={() => setMode(null)}>Cancel</button>
+              </div>
             </div>
           )}
           {mode === "handoff" && (

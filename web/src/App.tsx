@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, call, json, dueLabel, type AreaView, type Config, type Deck, type Task } from "./api";
+import { api, call, json, dueLabel, type Ask, type AreaView, type Config, type Deck, type Task } from "./api";
 import { SettingsPanel } from "./Settings";
 import { Travel } from "./Travel";
 import { Money } from "./Money";
@@ -69,6 +69,10 @@ export function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, [load]);
 
+  // While the assistant is working on something, keep checking for its answer.
+  const working = view === "deck" && Boolean(deck?.asks.some((a) => a.status === "working"));
+  useEffect(() => { if (!working) return; const t = setInterval(load, 4000); return () => clearInterval(t); }, [working, load]);
+
   const act = async (fn: () => Promise<unknown>) => {
     try {
       await fn();
@@ -110,6 +114,7 @@ export function App() {
 
       {view === "deck" && deck && (
         <>
+          {deck.asks.length > 0 && <Asks asks={deck.asks} act={act} />}
           <NextUp deck={deck} onDone={(id) => act(() => api.patch(id, { status: "done" }))} onLater={(id) => act(() => api.patch(id, { snooze: true }))} />
 
           {deck.addedToday > 0 && (
@@ -146,7 +151,7 @@ export function App() {
 
       {!deck && !error && <p className="muted">Loading your deck…</p>}
 
-      {filed && (
+      {filed && filed.length > 0 && (
         <div className="filed" role="status">
           <div className="filed-head">
             <span className="eyebrow accent">Filed</span>
@@ -166,7 +171,7 @@ export function App() {
       {view === "deck" && <QuickAdd
         stt={Boolean(config?.stt)}
         onError={setError}
-        onFiled={async (tasks) => { setFiled(tasks); await load(); }}
+        onFiled={async (tasks) => { setFiled(tasks.length ? tasks : null); await load(); }}
       />}
     </div>
   );
@@ -317,6 +322,7 @@ function Editor({ task, areas, act, onClose }: { task: Task; areas: AreaView[]; 
       )}
       <div className="row">
         <button className="btn ghost" onClick={onClose}>Close</button>
+        <button className="btn ghost" onClick={() => act(() => call(`/api/tasks/${task.id}/ask`, { method: "POST" }))}>Not a task: have Hermes do it</button>
         <button className="btn ghost danger" onClick={() => act(() => api.remove(task.id))}>Delete</button>
       </div>
     </div>
@@ -400,7 +406,7 @@ function QuickAdd({ stt, onFiled, onError }: { stt: boolean; onFiled: (t: Task[]
   const placeholder = recording ? `Listening… ${clock} · tap the mic to stop and file`
     : busy === "hearing" ? "Writing down what you said…"
     : busy === "filing" ? "Filing…"
-    : "Add anything: what, when it's due, how long, how important";
+    : "Add a task, or tell Hermes to do something";
 
   return (
     <footer className="quick">
@@ -457,5 +463,24 @@ function Noticed({ act }: { act: (fn: () => Promise<unknown>) => void }) {
         </div>
       ))}
     </div>
+  );
+}
+
+/** Things handed to the assistant to do, and what it said back. */
+function Asks({ asks, act }: { asks: Ask[]; act: (fn: () => Promise<unknown>) => void }) {
+  return (
+    <section className="asks" aria-label="Handed to Hermes">
+      <span className="eyebrow electro">Handed to Hermes</span>
+      {asks.map((a) => (
+        <div key={a.id} className={`ask ${a.status}`}>
+          <span className="ask-text">{a.text}{a.context_label && <span className="muted small block">About the {a.context_label}</span>}</span>
+          <span className={a.status === "failed" ? "ask-reply accent" : "ask-reply"} role="status">{a.status === "working" ? "Working on it…" : a.reply}</span>
+          <div className="row">
+            {a.status !== "working" && <button className="btn" onClick={() => act(() => call(`/api/asks/${a.id}`, { method: "DELETE" }))}>OK</button>}
+            <button className="btn ghost" onClick={() => act(() => call(`/api/asks/${a.id}/task`, { method: "POST" }))}>Make it my task instead</button>
+          </div>
+        </div>
+      ))}
+    </section>
   );
 }

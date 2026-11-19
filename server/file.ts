@@ -12,6 +12,8 @@ export interface Filed {
   minutes: number | null;
   delegate: string | null;
   note: string | null;
+  /** "ask" means it's an instruction for the assistant to carry out, not a task for the owner. */
+  kind: "task" | "ask";
 }
 
 /** Areas quick-add may file into. People is never auto-filed from the general quick-add. */
@@ -118,6 +120,9 @@ function cleanTitle(clause: string): string {
   return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
+// Phrases that address the assistant rather than describe something the owner has to do.
+const ASK = /^\s*(?:and\s+|also\s+|please\s+)*(?:hermes[,:]?\s+(?:please\s+)?\S|(?:make|take|keep)\s+(?:a\s+)?note\b|note\s+(?:that|down)\b|remember\s+that\b|save\s+(?:this|that)\b|look\s+up\b|find\s+out\b|research\b|summari[sz]e\b|draft\b|automate\b|set\s+up\s+an?\s+automation\b|keep\s+track\s+of\b|(?:can|could|would)\s+you\b)/i;
+
 /** Rules-only filing. One task per sentence or line. */
 export function fileByRules(text: string, day: string): Filed[] {
   const clauses = text
@@ -138,6 +143,7 @@ export function fileByRules(text: string, day: string): Filed[] {
       minutes: parseMinutes(c),
       delegate: parseDelegate(c),
       note: link ? link[0] : null,
+      kind: ASK.test(c) && !parseDelegate(c) ? "ask" : "task",
     });
   }
   return out;
@@ -146,7 +152,8 @@ export function fileByRules(text: string, day: string): Filed[] {
 const SYSTEM = (day: string) => `You file a person's spoken or typed notes into tasks. Today is ${day}.
 Return ONLY a JSON array. Each item: {"area": one of ${JSON.stringify(FILE_AREAS)}, "title": short imperative title in their words,
 "importance": 1 (low) | 2 (medium) | 3 (high), "due": "YYYY-MM-DD" or null, "time": "HH:MM" (24h) or null only if they gave a time of day, "minutes": estimated minutes or null only if they said it,
-"delegate": first name of the person who should do it or null, "note": any link they gave or null}.
+"delegate": first name of the person who should do it or null, "note": any link they gave or null, "kind": "task" | "ask"}.
+"kind" is "task" when it is something the person must do themselves or hand to a named person. It is "ask" when they are telling YOU, their assistant, to do it for them: make a note of something, remember something, look something up, summarise, draft, pull information out of an email, set up an automation. For an "ask", put their full instruction in "title", unshortened.
 One item per distinct thing to do. Do not invent tasks, dates or people.`;
 
 function validate(raw: unknown, day: string): Filed[] {
@@ -157,13 +164,14 @@ function validate(raw: unknown, day: string): Filed[] {
     const due = typeof r.due === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.due) && Math.abs(daysBetween(day, r.due)) < 3660 ? r.due : null;
     out.push({
       area: FILE_AREAS.includes(r.area) ? r.area : "work",
-      title: r.title.trim().slice(0, 200),
+      title: r.title.trim().slice(0, r.kind === "ask" ? 500 : 200),
       importance: [1, 2, 3].includes(r.importance) ? r.importance : 2,
       due,
       time: due && typeof r.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(r.time) ? r.time : null,
       minutes: Number.isFinite(r.minutes) && r.minutes > 0 && r.minutes < 6000 ? Math.round(r.minutes) : null,
       delegate: typeof r.delegate === "string" && r.delegate.trim() ? r.delegate.trim().slice(0, 60) : null,
       note: typeof r.note === "string" && r.note.trim() ? r.note.trim().slice(0, 500) : null,
+      kind: r.kind === "ask" ? "ask" : "task",
     });
   }
   if (!out.length) throw new Error("empty");
