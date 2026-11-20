@@ -631,6 +631,21 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     ctx.secret.set("stock_key", String(((await c.req.json().catch(() => ({}))) as any).key ?? "").trim().slice(0, 100));
     return c.json({ has_key: Boolean(quoteKey()) });
   });
+  // Look a company up by name or symbol, so the right listing is picked before anything is added.
+  app.post("/api/money/assets/search", async (c) => {
+    if (!quoteKey()) return c.json({ error: "Add a price key first." }, 400);
+    const q = String(((await c.req.json().catch(() => ({}))) as any).q ?? "").trim().slice(0, 40);
+    if (!q) return c.json({ error: "Type a company name or symbol." }, 400);
+    try {
+      const r = await ask(`function=SYMBOL_SEARCH&keywords=${encodeURIComponent(q)}`);
+      if (r.problem === "daily") return c.json({ error: "The price service has reached its limit for today on this key. Try the search tomorrow, or type the exact symbol." }, 429);
+      if (r.problem) return c.json({ error: r.problem === "key" ? "The price service didn't accept that key." : `The price service said: "${r.said.slice(0, 160)}"` }, 502);
+      const pick = (m: Record<string, string>, re: RegExp) => String(Object.entries(m).find(([k]) => re.test(k))?.[1] ?? "");
+      const matches = (Array.isArray(r.j.bestMatches) ? r.j.bestMatches : []).slice(0, 10).map((m: Record<string, string>) => ({ symbol: pick(m, /symbol/i), name: pick(m, /name/i), type: pick(m, /type/i), region: pick(m, /region/i), currency: pick(m, /currency/i) })).filter((m: any) => m.symbol);
+      return c.json({ matches });
+    } catch { return c.json({ error: "The price service couldn't be reached." }, 502); }
+  });
+
   app.post("/api/money/assets/refresh", async (c) => {
     if (!quoteKey()) return c.json({ error: "Add a price key first." }, 400);
     const r = await refreshQuotes(true);
@@ -662,6 +677,16 @@ export function mountMoney(app: Hono, ctx: Ctx) {
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const value = "value" in b ? num(b.value) : a.value, owing = "owing" in b ? num(b.owing) ?? 0 : a.owing;
     const shares = "shares" in b ? num(b.shares) : a.shares, price = "price" in b ? num(b.price) : a.price;
+    if (a.ticker && typeof b.ticker === "string" && b.ticker.trim() && b.ticker.trim().toUpperCase() !== a.ticker) {
+      // The wrong listing was picked: point the holding at the right one and forget the old price.
+      const ticker = b.ticker.trim().toUpperCase().slice(0, 20);
+      if (!/^[A-Z0-9.\-=^]+$/.test(ticker)) return c.json({ error: "That doesn't look like a ticker symbol." }, 400);
+      const currency = b.currency === "CAD" || b.currency === "USD" ? b.currency : guessCurrency(ticker);
+      const name = typeof b.name === "string" && b.name.trim() ? b.name.trim().slice(0, 80) : a.name === a.ticker ? ticker : a.name;
+      db.prepare("UPDATE money_assets SET ticker = ?, currency = ?, name = ?, price = NULL, price_day = NULL, tried_day = NULL, value = 0, fx = ?, updated_at = ? WHERE id = ?").run(ticker, currency, name, currency === "CAD" ? 1 : a.fx && a.fx !== 1 ? a.fx : 1.4, ctx.day(), a.id);
+      const got = quoteKey() ? await refreshQuotes() : null;
+      return c.json({ ok: true, failed: got?.failed ?? [], note: got?.note ?? null });
+    }
     if (a.ticker) {
       if (!shares || shares <= 0) return c.json({ error: "Enter how many shares." }, 400);
       db.prepare("UPDATE money_assets SET shares = ?, price = ?, value = ?, updated_at = ?, price_day = CASE WHEN ? THEN ? ELSE price_day END WHERE id = ?")

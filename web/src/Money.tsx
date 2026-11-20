@@ -232,22 +232,25 @@ function Transactions({ s, month, category, onChanged, onError }: { s: Session; 
 }
 
 interface Holding { id: number; name: string; kind: string; value: number; owing: number; equity: number; updated_at: string; ticker: string | null; shares: number | null; currency: string | null; price: number | null; price_day: string | null }
+interface Match { symbol: string; name: string; type: string; region: string; currency: string }
 interface Worth { assets: Holding[]; bitcoin: number | null; totals: { value: number; owing: number; net: number }; has_key: boolean; today: string }
 const dollars = (n: number) => `$${n.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 function Assets({ s, onError }: { s: Session; onError: (m: string) => void }) {
   const [w, setW] = useState<Worth | null>(null);
   const [add, setAdd] = useState<null | "stock" | "home" | "other" | "key">(null);
-  const [f, setF] = useState({ ticker: "", shares: "", currency: "", price: "", name: "", kind: "Property", value: "", owing: "", key: "" });
+  const [f, setF] = useState({ ticker: "", shares: "", currency: "", price: "", name: "", kind: "Property", value: "", owing: "", key: "", stockName: "" });
   const [edit, setEdit] = useState<number | null>(null);
-  const [e, setE] = useState({ shares: "", price: "", value: "", owing: "" });
+  const [e, setE] = useState({ shares: "", price: "", value: "", owing: "", ticker: "", name: "", currency: "" });
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [found, setFound] = useState<{ for: number | "new"; matches: Match[] } | null>(null);
+  const find = (q: string, target: number | "new") => { setBusy(true); s.call<{ matches: Match[] }>("/api/money/assets/search", json("POST", { q })).then((r) => setFound({ for: target, matches: r.matches })).catch((er) => onError(er.message)).finally(() => setBusy(false)); };
   const load = useCallback(() => s.call<Worth>("/api/money/assets").then(setW).catch((er) => onError(er.message)), [s, onError]);
   useEffect(() => { load(); }, [load]);
   if (!w) return <p className="muted">Loading…</p>;
   const act = async (fn: () => Promise<unknown>) => { setBusy(true); try { await fn(); await load(); } catch (er) { onError((er as Error).message); } finally { setBusy(false); } };
-  const reset = () => { setF({ ticker: "", shares: "", currency: "", price: "", name: "", kind: "Property", value: "", owing: "", key: "" }); setAdd(null); };
+  const reset = () => { setF({ ticker: "", shares: "", currency: "", price: "", name: "", kind: "Property", value: "", owing: "", key: "", stockName: "" }); setAdd(null); };
   const quoteNote = (r: { note?: string | null; failed?: string[] }) => [r.failed?.length ? `No price found for ${r.failed.join(", ")}. Check the symbol, or type the price in with Update.` : null, r.note ?? null].filter(Boolean).join(" ") || null;
   return (
     <div className="stack">
@@ -267,13 +270,16 @@ function Assets({ s, onError }: { s: Session; onError: (m: string) => void }) {
               </span>
             </span>
             <span>{dollars(a.equity)}{a.owing > 0 && <span className="muted small block" style={{ textAlign: "right" }}>equity</span>}</span>
-            <button className="btn ghost" onClick={() => { setEdit(edit === a.id ? null : a.id); setE({ shares: String(a.shares ?? ""), price: "", value: String(a.value), owing: String(a.owing || "") }); }}>Update</button>
+            <button className="btn ghost" onClick={() => { setEdit(edit === a.id ? null : a.id); setE({ shares: String(a.shares ?? ""), price: "", value: String(a.value), owing: String(a.owing || ""), ticker: a.ticker ?? "", name: "", currency: "" }); setFound(null); }}>Update</button>
             <button className="btn ghost" aria-label={`Remove ${a.name}`} onClick={() => act(() => s.call(`/api/money/assets/${a.id}`, { method: "DELETE" }))}>✕</button>
             {edit === a.id && (
-              <form className="form" style={{ flexBasis: "100%" }} onSubmit={(ev) => { ev.preventDefault(); act(async () => { await s.call(`/api/money/assets/${a.id}`, json("PATCH", a.ticker ? { shares: e.shares, ...(e.price ? { price: e.price } : {}) } : { value: e.value, owing: e.owing })); setEdit(null); }); }}>
+              <form className="form" style={{ flexBasis: "100%" }} onSubmit={(ev) => { ev.preventDefault(); act(async () => {
+                if (a.ticker && e.ticker.trim().toUpperCase() !== a.ticker) { const r = await s.call<{ failed: string[]; note: string | null }>(`/api/money/assets/${a.id}`, json("PATCH", { ticker: e.ticker, name: e.name || undefined, currency: e.currency || undefined })); setNote(quoteNote(r) ?? `Now tracking ${e.ticker.trim().toUpperCase()}.`); }
+                await s.call(`/api/money/assets/${a.id}`, json("PATCH", a.ticker ? { shares: e.shares, ...(e.price ? { price: e.price } : {}) } : { value: e.value, owing: e.owing })); setEdit(null); }); }}>
                 <div className="fields">
                   {a.ticker ? (
                     <>
+                      <label htmlFor={`et${a.id}`}>Ticker<input id={`et${a.id}`} type="text" autoCapitalize="characters" value={e.ticker} onChange={(ev) => setE({ ...e, ticker: ev.target.value })} /></label>
                       <label htmlFor={`es${a.id}`}>Shares<input id={`es${a.id}`} type="text" inputMode="decimal" value={e.shares} onChange={(ev) => setE({ ...e, shares: ev.target.value })} /></label>
                       <label htmlFor={`ep${a.id}`}>Price per share ({a.currency}), only to set it by hand<input id={`ep${a.id}`} type="text" inputMode="decimal" placeholder="leave blank to keep" value={e.price} onChange={(ev) => setE({ ...e, price: ev.target.value })} /></label>
                     </>
@@ -284,6 +290,10 @@ function Assets({ s, onError }: { s: Session; onError: (m: string) => void }) {
                     </>
                   )}
                 </div>
+                {a.ticker && w.has_key && <div className="row"><button className="btn ghost" type="button" disabled={busy || !e.ticker.trim()} onClick={() => find(e.ticker, a.id)}>{busy ? "Looking…" : "Wrong company? Find the right listing"}</button></div>}
+                {a.ticker && found?.for === a.id && (found.matches.length === 0 ? <p className="accent small" style={{ margin: 0 }}>No listings matched. Try the company name in the ticker box.</p> : (
+                  <ul className="list">{found.matches.map((m) => <li key={m.symbol}><button type="button" className="linkish grow" onClick={() => { setE({ ...e, ticker: m.symbol, name: m.name, currency: m.currency }); setFound(null); }}><strong>{m.symbol}</strong> · {m.name}<span className="muted small block">{m.region} · {m.currency} · {m.type}</span></button></li>)}</ul>
+                ))}
                 <div className="row"><button className="btn" type="submit" disabled={busy}>Save</button><button className="btn ghost" type="button" onClick={() => setEdit(null)}>Cancel</button></div>
               </form>
             )}
@@ -299,13 +309,17 @@ function Assets({ s, onError }: { s: Session; onError: (m: string) => void }) {
         <button className="btn ghost" onClick={() => setAdd(add === "key" ? null : "key")}>{w.has_key ? "Price key ✓" : "Set up stock prices"}</button>
       </div>
       {add === "stock" && (
-        <form className="form" onSubmit={(ev) => { ev.preventDefault(); act(async () => { const r = await s.call<{ priced: boolean; note: string | null; failed: string[] }>("/api/money/assets", json("POST", { ticker: f.ticker, shares: f.shares, currency: f.currency || undefined, price: f.price || undefined })); setNote(r.priced ? "Added." : quoteNote(r) ?? (w.has_key ? "Added. The price will fill in shortly." : "Added without a price. Set up stock prices, or use Update to type one in.")); reset(); }); }}>
+        <form className="form" onSubmit={(ev) => { ev.preventDefault(); act(async () => { const r = await s.call<{ priced: boolean; note: string | null; failed: string[] }>("/api/money/assets", json("POST", { ticker: f.ticker, shares: f.shares, currency: f.currency || undefined, price: f.price || undefined, name: f.stockName || undefined })); setNote(r.priced ? "Added." : quoteNote(r) ?? (w.has_key ? "Added. The price will fill in shortly." : "Added without a price. Set up stock prices, or use Update to type one in.")); reset(); }); }}>
           <div className="fields">
-            <label htmlFor="st">Ticker<input id="st" type="text" required autoCapitalize="characters" placeholder="AAPL, or SHOP.TRT for Toronto" value={f.ticker} onChange={(ev) => setF({ ...f, ticker: ev.target.value })} /></label>
+            <label htmlFor="st">Ticker<input id="st" type="text" required autoCapitalize="characters" placeholder="AAPL, or SHOP.TRT for Toronto" value={f.ticker} onChange={(ev) => setF({ ...f, ticker: ev.target.value, stockName: "" })} /></label>
             <label htmlFor="sh">Shares<input id="sh" type="text" inputMode="decimal" required value={f.shares} onChange={(ev) => setF({ ...f, shares: ev.target.value })} /></label>
             <label htmlFor="sc">Priced in<select id="sc" value={f.currency} onChange={(ev) => setF({ ...f, currency: ev.target.value })}><option value="">Work it out from the ticker</option><option>USD</option><option>CAD</option></select></label>
             {!w.has_key && <label htmlFor="sp">Price per share<input id="sp" type="text" inputMode="decimal" placeholder="optional" value={f.price} onChange={(ev) => setF({ ...f, price: ev.target.value })} /></label>}
           </div>
+          {w.has_key && <div className="row"><button className="btn" type="button" disabled={busy || !f.ticker.trim()} onClick={() => find(f.ticker, "new")}>{busy ? "Looking…" : "Find the right listing"}</button><span className="muted small">Shows the company and exchange for each match. Uses one lookup.</span></div>}
+          {found?.for === "new" && (found.matches.length === 0 ? <p className="accent small" style={{ margin: 0 }}>No listings matched. Try the company name.</p> : (
+            <ul className="list">{found.matches.map((m) => <li key={m.symbol}><button type="button" className="linkish grow" onClick={() => { setF({ ...f, ticker: m.symbol, currency: m.currency === "CAD" || m.currency === "USD" ? m.currency : "", stockName: m.name }); setFound(null); }}><strong>{m.symbol}</strong> · {m.name}<span className="muted small block">{m.region} · {m.currency} · {m.type}</span></button></li>)}</ul>
+          ))}
           <p className="muted small" style={{ margin: 0 }}>Toronto tickers end in .TRT (TSX) or .TRV (Venture). US holdings are converted to CAD at the day's rate. Only the ticker is ever sent to the price service, never how many shares you hold.</p>
           <div className="row"><button className="btn" type="submit" disabled={busy}>{busy ? "Adding…" : "Add stock"}</button><button className="btn ghost" type="button" onClick={reset}>Cancel</button></div>
         </form>

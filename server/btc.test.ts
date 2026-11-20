@@ -205,6 +205,9 @@ describe("what I own", () => {
       else if (sym === "BURST") body = { "Global Quote": { "05. price": "3.00" } };
       else if (sym === "PAID.TRV") body = { Information: "This is a premium endpoint. Subscribe to a premium plan." };
       else if (fn === "CURRENCY_EXCHANGE_RATE") body = { "Realtime Currency Exchange Rate": { "5. Exchange Rate": "1.4000" } };
+      else if (fn === "SYMBOL_SEARCH") body = { bestMatches: [{ "1. symbol": "BTCW", "2. name": "WisdomTree Bitcoin Fund", "3. type": "ETF", "4. region": "United States", "8. currency": "USD" }, { "1. symbol": "BTCW.TRV", "2. name": "Bitcoin Well Inc", "3. type": "Equity", "4. region": "Toronto Venture", "8. currency": "CAD" }] };
+      else if (sym === "BTCW") body = { "Global Quote": { "05. price": "90.00" } };
+      else if (sym === "BTCW.TRV") body = { "Global Quote": { "05. price": "0.20" } };
       else if (fn === "GLOBAL_QUOTE") body = { "Global Quote": sym === "AAPL" ? { "01. symbol": "AAPL", "05. price": "200.0000" } : sym === "SHOP.TRT" ? { "05. price": "150.50" } : {} };
       return new Response(JSON.stringify(body), { status: 200 });
     }));
@@ -237,6 +240,17 @@ describe("what I own", () => {
     expect(by("Home").equity).toBe(250000);
     expect(by("AAPL").value).toBe(5600);
     expect(by("NOPE").value).toBe(17.5); // typed in by hand, in USD at the stored rate
+    // The bare symbol matched a different company. Search shows which is which, and the holding can be re-pointed.
+    await call("POST", "/api/money/assets", { ticker: "BTCW", shares: 1000 });
+    v = await (await call("GET", "/api/money/assets")).json();
+    expect(by("BTCW").value).toBe(126000); // priced as the US fund, in USD: wrong
+    const found = await (await call("POST", "/api/money/assets/search", { q: "BTCW" })).json();
+    expect(found.matches[1]).toEqual({ symbol: "BTCW.TRV", name: "Bitcoin Well Inc", type: "Equity", region: "Toronto Venture", currency: "CAD" });
+    await call("PATCH", `/api/money/assets/${by("BTCW").id}`, { ticker: "btcw.trv", name: "Bitcoin Well Inc", currency: "CAD" });
+    v = await (await call("GET", "/api/money/assets")).json();
+    expect(by("Bitcoin Well Inc")).toMatchObject({ ticker: "BTCW.TRV", currency: "CAD", price: 0.2, value: 200, shares: 1000 });
+    await call("DELETE", `/api/money/assets/${by("Bitcoin Well Inc").id}`);
+
     // "One a second" is waited out and retried; "needs a paid plan" is reported for that ticker only.
     expect(await (await call("POST", "/api/money/assets", { ticker: "BURST", shares: 2, currency: "CAD" })).json()).toMatchObject({ priced: true });
     const paid = await (await call("POST", "/api/money/assets", { ticker: "PAID.TRV", shares: 100 })).json();
