@@ -1,6 +1,6 @@
 {
   "name": "life-architect",
-  "version": "0.3.14",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@scure/base": "^2.4.0",
     "@scure/bip32": "^2.4.0",
     "@scure/btc-signer": "^2.4.1",
@@ -21,7 +22,8 @@
     "mailparser": "^3.14.5",
     "nodemailer": "^10.6.0",
     "pdfjs-dist": "^4.10.38",
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@fontsource-variable/nunito-sans": "^5.1.0",

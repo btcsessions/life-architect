@@ -1,4 +1,5 @@
 import { serve } from "@hono/node-server";
+import { startMcp } from "./mcp.ts";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { existsSync, readFileSync } from "node:fs";
 import { openDb } from "./db.ts";
@@ -23,3 +24,6 @@ setInterval(() => { if (app.mailConnected()) app.syncMail().catch(() => {}); }, 
 
 // Refresh Bitcoin wallets every 30 minutes once any are added.
 setInterval(() => { if (app.hasWallets()) app.syncBtc().catch(() => {}); }, 30 * 60_000).unref();
+
+// The connector for Claude and other assistants, on its own port (see docs/claude-connector.md).
+startMcp(app, Number(process.env.MCP_PORT ?? 4601));

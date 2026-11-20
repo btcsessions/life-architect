@@ -27,6 +27,8 @@ One deck for everything on your plate, served from your Umbrel and reached over 
   rewritten, word-for-word quotes, open questions, readings with graded claims, and a research library.
   It uses only its own model. The deck and the relay show "People: something due" and nothing else.
 - **Noticed** (under Build & Automate): suggestions when you repeat something often enough to automate.
+- **Claude from your phone**: a connector on port 4601 lets Claude add and do things by voice from anywhere.
+  See [docs/claude-connector.md](docs/claude-connector.md).
 - **Relay**: lets Hermes add to the deck and read out what's next. See [docs/hermes.md](docs/hermes.md).
 
 ## Install and update

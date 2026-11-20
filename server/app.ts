@@ -32,7 +32,7 @@ export interface Ctx {
   /** The model for a module: its own if set, otherwise none (modules never borrow the deck's model silently). */
   modelFor: (prefix: "llm" | "money_llm" | "people_llm") => ModelConfig | null;
   /** File free text into deck tasks. Never files into People. */
-  capture: (text: string, source: string, opts?: { tasksOnly?: boolean }) => Promise<{ via: string; created: Array<Task & { area_name: string }>; asked: any[]; did: Did[] }>;
+  capture: (text: string, source: string, opts?: { tasksOnly?: boolean; full?: boolean }) => Promise<{ via: string; created: Array<Task & { area_name: string }>; asked: any[]; did: Did[] }>;
   /** Internal key/value store for things that aren't user settings (tokens, PIN hashes). */
   secret: { get: (k: string) => string | null; set: (k: string, v: string | null) => void };
 }
@@ -198,9 +198,10 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
 
   // Only what's typed or said in the app itself can be an ask. Anything relayed in by Hermes is always a task,
   // so a request can never bounce back to the assistant that sent it.
-  async function capture(text: string, source: string, opts: { tasksOnly?: boolean } = {}) {
-    const fromApp = !opts.tasksOnly && source === "app";
-    const direct = fromApp ? commands?.people(text) : null;
+  async function capture(text: string, source: string, opts: { tasksOnly?: boolean; full?: boolean } = {}) {
+    // "full" is the phone connector: it may drive modules like the app does, but never touches People.
+    const fromApp = !opts.tasksOnly && (source === "app" || opts.full === true);
+    const direct = fromApp && source === "app" ? commands?.people(text) : null;
     if (direct) return { via: "direct", created: [], asked: [], did: direct };
     const { items: all, actions, via } = await fileCapture(text, day(), model(), fetch, fromApp && commands ? { rules: ROUTER, context: commands.context(), kinds: ACTION_KINDS } : null);
     const canAsk = fromApp && Boolean(model());
@@ -319,5 +320,5 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
   openAsks = asks.open;
   commands = mountCommands(app, ctx, { addTx: money.addTx, peopleDrop: people.drop });
 
-  return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected, syncBtc: money.syncBtc, hasWallets: money.hasWallets });
+  return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected, syncBtc: money.syncBtc, hasWallets: money.hasWallets, capture, relayToken: () => secret.get("relay_token") });
 }
