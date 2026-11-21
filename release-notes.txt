@@ -1,0 +1,1 @@
+Work: rename and delete tutorials from an Edit button. Link the outline Google Doc or have Hermes find it in Drive. Hermes now finds the footage folder and YouTube upload itself, and can check where a tutorial already in production stands.

@@ -34,3 +34,45 @@ jobs:
             ghcr.io/btcsessions/life-architect:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Bumps the Umbrel store listing (btcsessions/umbrel-apps) to this version, so the Update button appears on the Umbrel.
+  # Needs a STORE_TOKEN secret: a fine-grained token with Contents read/write on btcsessions/umbrel-apps only.
+  store:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for the store token
+        id: t
+        env:
+          STORE_TOKEN: ${{ secrets.STORE_TOKEN }}
+        run: |
+          if [ -z "$STORE_TOKEN" ]; then echo "::warning::No STORE_TOKEN secret, so the store listing wasn't updated."; echo "ok=false" >> "$GITHUB_OUTPUT"; else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.t.outputs.ok == 'true'
+        with:
+          repository: btcsessions/umbrel-apps
+          token: ${{ secrets.STORE_TOKEN }}
+          path: store
+      - name: Point the listing at this version
+        if: steps.t.outputs.ok == 'true'
+        run: |
+          python3 - <<'PY'
+          import json, re, textwrap
+          v = json.load(open("package.json"))["version"]
+          notes = " ".join(open("release-notes.txt").read().split())
+          d = "store/btcsessions-life-architect/"
+          c = open(d + "docker-compose.yml").read()
+          c = re.sub(r"(ghcr\.io/btcsessions/life-architect:)\S+", r"\g<1>" + v, c)
+          open(d + "docker-compose.yml", "w").write(c)
+          a = open(d + "umbrel-app.yml").read()
+          a = re.sub(r'^version: .*$', f'version: "{v}"', a, flags=re.M)
+          body = "\n".join("  " + l for l in textwrap.wrap(notes, 110))
+          a = re.sub(r"^releaseNotes: >-\n(?:  .*\n)+", "releaseNotes: >-\n" + body + "\n", a, flags=re.M)
+          open(d + "umbrel-app.yml", "w").write(a)
+          PY
+          cd store
+          git config user.name "life-architect release"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "Listing already up to date."; else git commit -m "Life Architect $(node -p "require('../package.json').version")" && git push; fi

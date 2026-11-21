@@ -74,3 +74,7 @@ npm test
 ```
 
 Pushing to `main` builds `ghcr.io/btcsessions/life-architect:<version in package.json>`.
+
+**Releasing:** bump `version` in `package.json` and rewrite `release-notes.txt` (one paragraph), then push to `main`.
+The workflow builds the image, then updates the listing in `btcsessions/umbrel-apps` (version, image tag, release notes)
+using the `STORE_TOKEN` secret, so **Update** appears on the Umbrel. No one needs to touch the store repo by hand.
