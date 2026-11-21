@@ -8,9 +8,9 @@ export interface Did {
   module: string; text: string; ok: boolean; detail?: string;
   /** A follow-up that needs his tap, e.g. Send. */
   action?: { label: string; path: string; body: unknown; done: string };
-  open?: "travel" | "money" | "people" | "inbox";
+  open?: "travel" | "money" | "people" | "inbox" | "work";
 }
-export const ACTION_KINDS = ["done", "change", "trip", "trip_item", "expense", "email"];
+export const ACTION_KINDS = ["done", "change", "trip", "trip_item", "expense", "email", "tutorial_check"];
 
 export const ROUTER = `
 Other kinds, used ONLY when the person clearly asks for that thing. Use ids from the lists at the end; never invent an id.
@@ -19,12 +19,13 @@ Other kinds, used ONLY when the person clearly asks for that thing. Use ids from
 {"kind":"trip","name":short name,"place":where or null,"start":"YYYY-MM-DD" or null,"end":"YYYY-MM-DD" or null,"budget":number or null}: a new trip.
 {"kind":"trip_item","trip_id":n,"type":"flight"|"stay"|"event"|"cost","title":...,"day":"YYYY-MM-DD" or null,"time":"HH:MM" or null,"cost":number or null,"booked":true|false}: a booking, plan or cost for a listed trip.
 {"kind":"expense","description":what it was,"amount":number,"day":"YYYY-MM-DD" or null,"direction":"out"|"in"}: money they spent or received, when they ask to log it.
-{"kind":"email","find":the words that identify the email (sender, company, subject),"do":"reply"|"handoff"|"task"|"ask","say":what to reply, the note for the hand-off, the task, or the instruction,"to":name of the person to hand it to or null}: something about an email they received. "ask" means you, the assistant, should do something with that email (make a note from it, pull details out).`;
+{"kind":"email","find":the words that identify the email (sender, company, subject),"do":"reply"|"handoff"|"task"|"ask","say":what to reply, the note for the hand-off, the task, or the instruction,"to":name of the person to hand it to or null}: something about an email they received. "ask" means you, the assistant, should do something with that email (make a note from it, pull details out).
+{"kind":"tutorial_check","title":the tutorial's name,"done":what they say is already done, or ""}: they ask to check on a tutorial video, or say how far along one is (recorded, edited, uploaded). The assistant finds the outline, footage and upload itself.`;
 
 const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9@. ]/g, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w));
 const STOP = new Set(["the", "email", "mail", "message", "from", "about", "that", "this", "with", "for", "and", "one", "sent", "got", "their", "his", "her", "them", "regarding"]);
 
-export function mountCommands(app: Hono, ctx: Ctx, deps: { addTx: (day: string, description: string, amount: number, account: string | null) => boolean; peopleDrop: (text: string, source: string) => void }) {
+export function mountCommands(app: Hono, ctx: Ctx, deps: { addTx: (day: string, description: string, amount: number, account: string | null) => boolean; peopleDrop: (text: string, source: string) => void; tutorialCheck?: (name: string, done: string) => { ok: boolean; text: string } }) {
   const { db } = ctx;
   const post = async (path: string, body: unknown, method = "POST") => {
     const r = await app.request(path, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -63,6 +64,11 @@ export function mountCommands(app: Hono, ctx: Ctx, deps: { addTx: (day: string, 
         if (!Object.keys(patch).length) return { module: "Deck", ok: false, text: `Not sure what to change on "${t.title}".` };
         await post(`/api/tasks/${t.id}`, patch, "PATCH");
         return { module: "Deck", ok: true, text: `Updated: ${t.title}`, detail: Object.entries(patch).map(([k, v]) => `${k.replace("due_time", "time")}: ${v}`).join(" · ") };
+      }
+      case "tutorial_check": {
+        if (!deps.tutorialCheck) return { module: "Work", ok: false, text: "Work isn't set up." };
+        const r = deps.tutorialCheck(String(a.title ?? ""), String(a.done ?? ""));
+        return { module: "Work", ok: r.ok, text: r.text, open: "work" };
       }
       case "trip": {
         const t = await post("/api/trips", { name: a.name, place: a.place ?? undefined, start: a.start ?? undefined, end: a.end ?? undefined, budget: a.budget ?? undefined });

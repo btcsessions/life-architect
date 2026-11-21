@@ -26,7 +26,7 @@ Every call sends the header `Authorization: Bearer <token>`.
 | --- | --- |
 | `POST /api/relay/tutorials` with `{"source": "Hermes list", "items": [{"title": "...", "notes": "...", "links": [{"label": "...", "url": "..."}]}]}` | Adds tutorial ideas to the Up next list. Titles already there are skipped, so it can be re-run. |
 | `GET /api/relay/tutorials` | The open tutorials with their stage. |
-| `POST /api/relay/tutorial-update` with `{"title": "...", "stage": "youtube_prep", "note": "...", "link": "https://..."}` | Reports progress on one tutorial: moves its stage, adds a line to its history, attaches a link. Stages: `idea`, `outline`, `record`, `line_edit`, `youtube_prep`, `live`. |
+| `POST /api/relay/tutorial-update` with `{"title": "...", "stage": "youtube_prep", "note": "...", "link": "https://..."}` | Reports progress on one tutorial: moves its stage, adds a line to its history, attaches a link. Optional `"outline_url"`, `"folder"` (footage folder in Movies on the M5 Max) and `"video"` (YouTube ID or link) fill those in. Stages: `idea`, `outline`, `record`, `line_edit`, `youtube_prep`, `live`. |
 
 Life Architect triggers Hermes's own skills by sending the same words you would:
 
@@ -72,3 +72,9 @@ can be re-run safely. The answer is counts only. Nothing is deleted from Hermes 
 
 In Life Architect, people who arrive this way show under **People › Handed over · not set up yet**. Open one to say
 what you want the relationship to be, merge it into another entry ("Dana" and "Dana Lee"), rename it, or remove it.
+
+**Finding things.** The app never asks Ben for a video ID, footage folder or outline link. Line edit and YouTube prep tell Hermes
+to find them as usual, and "Check where it stands" / "Find it in Drive" ask Hermes to look (Drive, Movies on the M5 Max,
+YouTube) without starting any skill. Hermes ends those replies with a `<<<FOUND … FOUND>>>` block of `key: value` lines
+(`stage`, `outline`, `folder`, `video`, `link: label | url`, `note`), which the app reads and strips before showing the reply.
+Stages found this way only ever move a tutorial forward.

@@ -15,7 +15,7 @@ export interface Task {
 }
 export interface AreaView { id: string; name: string; locked: boolean; need: number; mail?: number; items: Task[] }
 export interface NextItem { id: number; area_id: string; title: string; locked: boolean; why: string[] }
-export interface Did { module: string; text: string; ok: boolean; detail?: string; action?: { label: string; path: string; body: unknown; done: string }; open?: "travel" | "money" | "people" | "inbox" }
+export interface Did { module: string; text: string; ok: boolean; detail?: string; action?: { label: string; path: string; body: unknown; done: string }; open?: "travel" | "money" | "people" | "inbox" | "work" }
 export interface Ask { id: number; text: string; context_label: string | null; status: "working" | "done" | "failed"; reply: string | null; created_at: string }
 export interface Deck { today: string; next: NextItem[]; areas: AreaView[]; addedToday: number; asks: Ask[] }
 export interface Config { model: string | null; stt: boolean }

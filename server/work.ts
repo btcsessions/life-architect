@@ -16,6 +16,26 @@ type Msg = { role: "system" | "user" | "assistant"; content: string };
 /** The address Hermes uses to reach this app from its own container on the same Umbrel. */
 const selfUrl = () => (process.env.SELF_URL ?? "http://btcsessions-life-architect_web_1:4600").replace(/\/+$/, "");
 const INTRO = /<<<INTRO\s*([\s\S]*?)\s*INTRO>>>/;
+const FOUND = /<<<FOUND\s*([\s\S]*?)\s*FOUND>>>/;
+const STAGE_HELP = "idea (not outlined yet), outline (outline not finished), record (outline done, not recorded yet), line_edit (recorded, not edited yet), youtube_prep (edited, YouTube prep not done yet), live (published)";
+/** Asks Hermes to end its reply with what it found, in lines the app can read. */
+const foundAsk = (keys: string[]) => `End your reply with what you found, between a line reading "<<<FOUND" and a line reading "FOUND>>>", one item per line, leaving out anything you didn't find:\n${[
+  ["stage", `stage: <where it is now, one of: ${STAGE_HELP}>`],
+  ["outline", "outline: <the link to the outline Google Doc>"],
+  ["folder", "folder: <the footage folder's name in Movies on the M5 Max>"],
+  ["video", "video: <the YouTube video ID of the upload>"],
+  ["link", "link: <what it is> | <https link>   (one line per useful link, like the rough cut in Drive)"],
+  ["note", "note: <one line on where it stands>"],
+].filter(([k]) => keys.includes(k)).map(([, line]) => line).join("\n")}`;
+/** A YouTube video ID from an ID or any YouTube link. */
+export function videoId(v: string): string | null {
+  const m = v.match(/(?:[?&]v=|youtu\.be\/|\/shorts\/|\/video\/|\/live\/)([\w-]{11})/);
+  if (m) return m[1];
+  const bare = v.trim().replace(/^["'`]|["'`]$/g, "");
+  return /^[\w-]{6,40}$/.test(bare) ? bare : null;
+}
+/** A reply as he sees it: without the block meant for the app. */
+const shown = (reply: string | null) => (reply ? reply.replace(FOUND, "").trim() || "Done." : reply);
 
 export function mountWork(app: Hono, ctx: Ctx) {
   const { db } = ctx;
@@ -36,23 +56,29 @@ export function mountWork(app: Hono, ctx: Ctx) {
       messages TEXT NOT NULL, reply TEXT, created_at TEXT NOT NULL, done_at TEXT
     );
   `);
+  if (!(db.prepare("PRAGMA table_info(tutorials)").all() as any[]).some((c) => c.name === "outline_url")) db.exec("ALTER TABLE tutorials ADD COLUMN outline_url TEXT");
   db.prepare("UPDATE work_jobs SET status = 'failed', reply = 'This was interrupted by a restart. Run it again.' WHERE status = 'working'").run();
   const now = () => ctx.now().toISOString();
   const bad = (c: any, error: string, status = 400) => c.json({ error }, status);
   const log = (id: number, text: string) => db.prepare("INSERT INTO tutorial_log (tutorial_id, ts, text) VALUES (?, ?, ?)").run(id, now(), text.slice(0, 500));
   const tut = (id: number) => db.prepare("SELECT * FROM tutorials WHERE id = ?").get(id) as any;
   const byTitle = (title: string) => db.prepare("SELECT * FROM tutorials WHERE lower(title) = lower(?) ORDER BY filed_at IS NOT NULL, id DESC").get(title.trim()) as any;
-  /** A spoken or typed name matched loosely: exact first, then the one open tutorial whose title contains it. */
-  const find = (name: string) => {
+  /** Open tutorials whose title loosely matches a spoken or typed name. */
+  const matches = (name: string): any[] => {
     const exact = byTitle(name);
-    if (exact) return exact;
+    if (exact) return [exact];
     const q = name.trim().toLowerCase();
-    const hits = (db.prepare("SELECT * FROM tutorials WHERE filed_at IS NULL").all() as any[]).filter((t) => t.title.toLowerCase().includes(q) || q.includes(t.title.toLowerCase()));
-    return hits.length === 1 ? hits[0] : null;
+    if (q.length < 2) return [];
+    return (db.prepare("SELECT * FROM tutorials WHERE filed_at IS NULL").all() as any[]).filter((t) => t.title.toLowerCase().includes(q) || q.includes(t.title.toLowerCase()));
   };
-  const lastJob = (kind: string, ref: number) => db.prepare("SELECT id, kind, status, reply, created_at, done_at FROM work_jobs WHERE kind = ? AND ref = ? ORDER BY id DESC").get(kind, ref) as any;
+  /** The one open tutorial a name points to, or null when none or several match. */
+  const find = (name: string) => { const hits = matches(name); return hits.length === 1 ? hits[0] : null; };
+  const lastJob = (kind: string, ref: number) => {
+    const j = db.prepare("SELECT id, kind, status, reply, created_at, done_at FROM work_jobs WHERE kind = ? AND ref = ? ORDER BY id DESC").get(kind, ref) as any;
+    return j ? { ...j, reply: shown(j.reply) } : j;
+  };
   const brief = (t: any) => ({
-    id: t.id, title: t.title, stage: t.stage as Stage, stage_number: STAGES.indexOf(t.stage) + 1, source: t.source, has_outline: Boolean(t.outline),
+    id: t.id, title: t.title, stage: t.stage as Stage, stage_number: STAGES.indexOf(t.stage) + 1, source: t.source, has_outline: Boolean(t.outline || t.outline_url),
     links: (db.prepare("SELECT count(*) AS n FROM tutorial_links WHERE tutorial_id = ?").get(t.id) as any).n, has_notes: Boolean(t.notes), filed_at: t.filed_at,
     running: (db.prepare("SELECT kind FROM work_jobs WHERE ref = ? AND status = 'working' AND kind != 'bitcast'").get(t.id) as any)?.kind ?? null,
   });
@@ -83,6 +109,52 @@ export function mountWork(app: Hono, ctx: Ctx) {
   }
   const working = (kind: string, ref: number) => Boolean(db.prepare("SELECT 1 FROM work_jobs WHERE kind = ? AND ref = ? AND status = 'working'").get(kind, ref));
 
+  /** Read the FOUND block of a reply and fill in what Hermes found. Stages only move forward. Returns what changed. */
+  function applyFound(id: number, reply: string): string[] {
+    const block = reply.match(FOUND)?.[1];
+    const t = tut(id);
+    if (!block || !t) return [];
+    const did: string[] = [];
+    const set = (col: string, v: unknown) => db.prepare(`UPDATE tutorials SET ${col} = ?, updated_at = ? WHERE id = ?`).run(v, now(), id);
+    const urls = new Set((db.prepare("SELECT url FROM tutorial_links WHERE tutorial_id = ?").all(id) as any[]).map((l) => l.url));
+    let stage = t.stage as Stage;
+    for (const raw of block.split(/\r?\n/)) {
+      const m = raw.match(/^\s*[-*•]?\s*(stage|outline|folder|video|link|note)\s*:\s*(.+?)\s*$/i);
+      if (!m) continue;
+      const key = m[1].toLowerCase(), v = m[2];
+      if (/^(none|unknown|n\/a|not found|nothing|-+|<.*>)$/i.test(v)) continue;
+      const url = v.match(/https?:\/\/[^\s|<>"')]+/)?.[0];
+      if (key === "stage") {
+        const s = v.toLowerCase().replace(/^([a-z _-]+).*$/, "$1").trim().replace(/[\s-]+/g, "_") as Stage;
+        if (STAGES.includes(s) && STAGES.indexOf(s) > STAGES.indexOf(stage)) { stage = s; set("stage", s); did.push(`moved it to ${STAGE_NAMES[s]}`); }
+      } else if (key === "outline" && url && url !== t.outline_url) { set("outline_url", url.slice(0, 1000)); did.push("linked the outline doc"); }
+      else if (key === "folder") { const f = v.replace(/^["'`]|["'`]$/g, "").slice(0, 120); if (f !== t.folder) { set("folder", f); did.push(`found the footage folder (${f})`); } }
+      else if (key === "video") { const vid = videoId(v); if (vid && vid !== t.video_id) { set("video_id", vid); did.push("found the YouTube upload"); } }
+      else if (key === "link" && url && !urls.has(url)) {
+        urls.add(url);
+        const label = v.split("|")[0].replace(url, "").trim().slice(0, 120) || "From Hermes";
+        db.prepare("INSERT INTO tutorial_links (tutorial_id, label, url) VALUES (?, ?, ?)").run(id, label, url.slice(0, 1000));
+        did.push(`added a link (${label})`);
+      } else if (key === "note") log(id, `Hermes: ${v}`);
+    }
+    if (stage === "idea" && did.includes("linked the outline doc")) set("stage", "outline");
+    if (did.length) log(id, `Hermes ${did.join(", ")}`);
+    return did;
+  }
+
+  /** Have Hermes look around (Drive, Movies on the M5 Max, YouTube) and fill in the tutorial. Returns an error, or null once started. */
+  function startCheck(t: any, say: string, only?: "outline"): string | null {
+    if (!ctx.modelFor("llm")) return "Set the deck model (Hermes) in Settings first.";
+    if (working("check", t.id)) return "Hermes is already checking on this one.";
+    const known = [t.outline_url && `the outline doc is ${t.outline_url}`, t.folder && `the footage folder is ${t.folder}`, t.video_id && `the YouTube video ID is ${t.video_id}`].filter(Boolean);
+    const content = only === "outline"
+      ? `Find the outline for my "${t.title}" tutorial in Google Drive. It's a Google Doc. If more than one could be it, pick the most likely and say which others you saw.${say ? ` ${say}` : ""} Reply in a line or two. ${foundAsk(["outline"])}`
+      : `Check where my "${t.title}" tutorial stands. ${say ? `What I've said is done: ${say}.` : "I haven't said what's done, so work it out from what you can see."}${known.length ? ` Already known: ${known.join("; ")}.` : ""} Look for what it needs the way you usually would: the outline (a Google Doc in Drive), the footage folder in Movies on the M5 Max, the rough cut in Drive, and the upload on YouTube. Only find things: don't start a line edit or YouTube prep. Reply briefly with where it stands. ${foundAsk(["stage", "outline", "folder", "video", "link", "note"])}`;
+    log(t.id, only === "outline" ? "Asked Hermes to find the outline in Drive" : say ? `Asked Hermes to check where it stands: ${say}` : "Asked Hermes to check where it stands");
+    runJob("check", t.id, [{ role: "user", content }], (reply) => { if (!applyFound(t.id, reply).length) log(t.id, "Hermes checked and found nothing new"); });
+    return null;
+  }
+
   // ---- Work home
   app.get("/api/work", (c) => {
     const open = db.prepare("SELECT * FROM tutorials WHERE filed_at IS NULL ORDER BY position, id").all() as any[];
@@ -106,19 +178,22 @@ export function mountWork(app: Hono, ctx: Ctx) {
     let added = 0, first: any = null;
     for (const line of lines.slice(0, 300)) { const r = addTutorial(line, { notes: lines.length === 1 ? b.notes : undefined, source: b.source }); if (r?.created) added++; first ??= r?.row; }
     if (!first) return bad(c, "Give the tutorial a title.");
-    return c.json({ added, already_there: lines.length - added, tutorial: brief(first) });
+    // Already underway: have Hermes find where it's at straight away.
+    const underway = lines.length === 1 && typeof b.underway === "string" ? b.underway.trim().slice(0, 2000) : "";
+    const problem = underway ? startCheck(first, underway) : null;
+    return c.json({ added, already_there: lines.length - added, tutorial: brief(tut(first.id)), checking: Boolean(underway) && !problem, problem });
   });
   app.get("/api/work/tutorials/:id", (c) => {
     const t = tut(Number(c.req.param("id")));
     if (!t) return bad(c, "No such tutorial.", 404);
     const i = STAGES.indexOf(t.stage);
     return c.json({
-      ...brief(t), notes: t.notes, outline: t.outline, outline_from: t.outline_from, video_id: t.video_id, folder: t.folder,
+      ...brief(t), notes: t.notes, outline: t.outline, outline_from: t.outline_from, outline_url: t.outline_url, video_id: t.video_id, folder: t.folder,
       next_stage: i < STAGES.length - 1 ? { id: STAGES[i + 1], name: STAGE_NAMES[STAGES[i + 1]] } : null,
       stages: STAGES.map((s, n) => ({ id: s, name: STAGE_NAMES[s], state: n < i ? "done" : n === i ? "now" : "later" })),
       link_list: db.prepare("SELECT * FROM tutorial_links WHERE tutorial_id = ? ORDER BY id").all(t.id),
       log: db.prepare("SELECT ts, text FROM tutorial_log WHERE tutorial_id = ? ORDER BY id DESC LIMIT 30").all(t.id),
-      jobs: { line_edit: lastJob("line_edit", t.id) ?? null, youtube_prep: lastJob("youtube_prep", t.id) ?? null },
+      jobs: { line_edit: lastJob("line_edit", t.id) ?? null, youtube_prep: lastJob("youtube_prep", t.id) ?? null, check: lastJob("check", t.id) ?? null },
       has_model: Boolean(ctx.modelFor("llm")),
     });
   });
@@ -127,9 +202,22 @@ export function mountWork(app: Hono, ctx: Ctx) {
     if (!t) return bad(c, "No such tutorial.", 404);
     const b = (await c.req.json().catch(() => ({}))) as any;
     const set = (col: string, v: unknown) => db.prepare(`UPDATE tutorials SET ${col} = ?, updated_at = ? WHERE id = ?`).run(v, now(), t.id);
-    if (typeof b.title === "string" && b.title.trim()) set("title", b.title.trim().slice(0, 160));
+    if (typeof b.title === "string") {
+      const title = b.title.replace(/\s+/g, " ").trim().slice(0, 160);
+      if (!title) return bad(c, "Give the tutorial a title.");
+      const clash = byTitle(title);
+      if (clash && clash.id !== t.id) return bad(c, `There's already a tutorial called "${clash.title}".`, 409);
+      if (title !== t.title) { set("title", title); log(t.id, `Renamed from "${t.title}"`); }
+    }
+    if ("outline_url" in b) {
+      const url = typeof b.outline_url === "string" ? b.outline_url.trim() : "";
+      if (url && !/^https:\/\/\S+$/.test(url)) return bad(c, "Paste the Google Doc's link (it starts with https://).");
+      set("outline_url", url ? url.slice(0, 1000) : null);
+      log(t.id, url ? "Outline doc linked" : "Outline doc unlinked");
+      if (url && t.stage === "idea") set("stage", "outline");
+    }
     if ("notes" in b) set("notes", typeof b.notes === "string" && b.notes.trim() ? b.notes.slice(0, 8000) : null);
-    if ("video_id" in b) set("video_id", typeof b.video_id === "string" && b.video_id.trim() ? b.video_id.trim().slice(0, 40) : null);
+    if ("video_id" in b) set("video_id", typeof b.video_id === "string" && b.video_id.trim() ? videoId(b.video_id) ?? b.video_id.trim().slice(0, 40) : null);
     if ("folder" in b) set("folder", typeof b.folder === "string" && b.folder.trim() ? b.folder.trim().slice(0, 120) : null);
     if ("outline" in b) {
       const text = typeof b.outline === "string" && b.outline.trim() ? b.outline.slice(0, 60_000) : null;
@@ -145,6 +233,7 @@ export function mountWork(app: Hono, ctx: Ctx) {
   app.delete("/api/work/tutorials/:id", (c) => {
     const id = Number(c.req.param("id"));
     for (const table of ["tutorial_links", "tutorial_log"]) db.prepare(`DELETE FROM ${table} WHERE tutorial_id = ?`).run(id);
+    db.prepare("DELETE FROM work_jobs WHERE ref = ? AND kind != 'bitcast'").run(id);
     return c.json({ removed: db.prepare("DELETE FROM tutorials WHERE id = ?").run(id).changes });
   });
   // The new order of the ideas list, top to bottom.
@@ -165,6 +254,15 @@ export function mountWork(app: Hono, ctx: Ctx) {
   });
   app.delete("/api/work/links/:id", (c) => c.json({ removed: db.prepare("DELETE FROM tutorial_links WHERE id = ?").run(Number(c.req.param("id"))).changes }));
 
+  // Have Hermes check where it stands (from what he says is done), or just find the outline doc in Drive.
+  app.post("/api/work/tutorials/:id/check", async (c) => {
+    const t = tut(Number(c.req.param("id")));
+    if (!t) return bad(c, "No such tutorial.", 404);
+    const b = (await c.req.json().catch(() => ({}))) as any;
+    const problem = startCheck(t, String(b.say ?? "").trim().slice(0, 2000), b.find === "outline" ? "outline" : undefined);
+    return problem ? bad(c, problem, problem.startsWith("Set") ? 400 : 409) : c.json({ started: true });
+  });
+
   // Hand the tutorial's next job to one of Hermes's skills.
   app.post("/api/work/tutorials/:id/run", async (c) => {
     const t = tut(Number(c.req.param("id")));
@@ -180,14 +278,14 @@ export function mountWork(app: Hono, ctx: Ctx) {
     const history: Msg[] = say && prev?.status === "done" ? JSON.parse((db.prepare("SELECT messages FROM work_jobs WHERE id = ?").get(prev.id) as any).messages) : [];
     let first: string;
     if (kind === "line_edit") {
-      first = `Line edit ${t.folder || t.title}.${t.outline ? "" : " There is no outline saved in Life Architect for this one."} Send progress, questions and the finished link to me on Telegram as usual. When it has finished, also tell Life Architect with the relay call POST /api/relay/tutorial-update {"title": ${JSON.stringify(t.title)}, "stage": "youtube_prep", "note": "<one line>", "link": "<the Drive folder>"}. Reply here only with whether it started.`;
+      first = `Line edit the "${t.title}" tutorial.${t.folder ? ` The footage folder is ${t.folder} in Movies on the M5 Max.` : " Work out which folder in Movies on the M5 Max is its footage, as you usually do."}${t.outline_url ? ` The outline is the Google Doc at ${t.outline_url}.` : " Find its outline in Drive as usual."} Send progress, questions and the finished link to me on Telegram as usual. When it has finished, also tell Life Architect with the relay call POST /api/relay/tutorial-update {"title": ${JSON.stringify(t.title)}, "stage": "youtube_prep", "note": "<one line>", "link": "<the Drive folder>", "folder": "<the footage folder you used>"}. Reply here only with whether it started, and which folder you're using.`;
     } else {
-      first = `YouTube prep for "${t.title}".${t.video_id ? ` The private upload's video ID is ${t.video_id}.` : ""}${say && !history.length ? ` ${say}` : ""}`;
+      first = `YouTube prep for "${t.title}".${t.video_id ? ` The private upload's video ID is ${t.video_id}.` : " Find the upload on the channel yourself, as you usually do."}${say && !history.length ? ` ${say}` : ""} ${foundAsk(["video"])}`;
     }
     const messages: Msg[] = history.length ? [...history, { role: "user", content: say }] : [{ role: "user", content: first }];
     if (STAGES.indexOf(t.stage) < STAGES.indexOf(kind)) db.prepare("UPDATE tutorials SET stage = ?, updated_at = ? WHERE id = ?").run(kind, now(), t.id);
     log(t.id, history.length ? `Replied to Hermes about the ${STAGE_NAMES[kind].toLowerCase()}` : `${STAGE_NAMES[kind]} handed to Hermes`);
-    runJob(kind, t.id, messages, () => log(t.id, kind === "line_edit" ? "Hermes answered about the line edit" : "YouTube prep came back from Hermes"));
+    runJob(kind, t.id, messages, (reply) => { log(t.id, kind === "line_edit" ? "Hermes answered about the line edit" : "YouTube prep came back from Hermes"); applyFound(t.id, reply); });
     return c.json({ started: true });
   });
 
@@ -290,6 +388,12 @@ export function mountWork(app: Hono, ctx: Ctx) {
     if (typeof b.note === "string" && b.note.trim()) log(t.id, `Hermes: ${b.note.trim()}`);
     if (typeof b.link === "string" && /^https?:\/\//.test(b.link)) db.prepare("INSERT INTO tutorial_links (tutorial_id, label, url) VALUES (?, ?, ?)").run(t.id, String(b.link_label ?? "From Hermes").slice(0, 120), b.link.slice(0, 1000));
     if (typeof b.outline === "string" && b.outline.trim()) { db.prepare("UPDATE tutorials SET outline = ?, outline_from = 'Hermes', updated_at = ? WHERE id = ?").run(b.outline.slice(0, 60_000), now(), t.id); log(t.id, "Outline saved by Hermes"); }
+    const found = [
+      typeof b.outline_url === "string" && `outline: ${b.outline_url}`,
+      typeof b.folder === "string" && b.folder.trim() && `folder: ${b.folder}`,
+      typeof b.video === "string" && `video: ${b.video}`, typeof b.video_id === "string" && `video: ${b.video_id}`,
+    ].filter(Boolean);
+    if (found.length) applyFound(t.id, `<<<FOUND\n${found.join("\n")}\nFOUND>>>`);
     return c.json({ ok: true, title: t.title });
   });
 
@@ -304,6 +408,15 @@ export function mountWork(app: Hono, ctx: Ctx) {
       db.prepare("UPDATE tutorials SET outline = ?, outline_from = 'a voice session with Claude', stage = CASE WHEN stage = 'idea' THEN 'outline' ELSE stage END, updated_at = ? WHERE id = ?").run(outline.slice(0, 60_000), now(), t.id);
       log(t.id, "Outline saved from Claude");
       return tut(t.id).title as string;
+    },
+    /** Check on a tutorial by name; one that isn't on the list yet is added first, since he's describing real work. */
+    check: (name: string, done: string): { ok: boolean; text: string; id?: number } => {
+      const hits = matches(name);
+      if (hits.length > 1) return { ok: false, text: `More than one tutorial matches "${name}": ${hits.slice(0, 5).map((h) => h.title).join(", ")}. Say which.` };
+      const t = hits[0] ?? addTutorial(name, { source: "a check-in" })?.row;
+      if (!t) return { ok: false, text: "Say which tutorial to check on." };
+      const problem = startCheck(t, done.trim().slice(0, 2000));
+      return problem ? { ok: false, text: problem, id: t.id } : { ok: true, text: `${hits[0] ? "" : `Added "${t.title}" and `}asked Hermes to check where "${t.title}" stands. What it finds goes onto the tutorial in Work.`, id: t.id };
     },
   };
 }

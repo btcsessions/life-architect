@@ -7,7 +7,7 @@ type Screen = { at: "home" } | { at: "tutorial"; id: number } | { at: "bitcast";
 interface Brief { id: number; title: string; stage: string; stage_number: number; source: string; has_outline: boolean; has_notes: boolean; links: number; running: string | null; filed_at: string | null }
 interface Home { stages: Array<{ id: string; name: string }>; in_motion: Brief[]; up_next: Brief[]; bitcast: { day: string; has_file: boolean; takes: number; running: boolean } | null; filed: number; has_model: boolean }
 interface Job { status: "working" | "done" | "failed"; reply: string | null; created_at: string }
-interface Full extends Brief { notes: string | null; outline: string | null; outline_from: string | null; video_id: string | null; folder: string | null; next_stage: { id: string; name: string } | null; stages: Array<{ id: string; name: string; state: string }>; link_list: Array<{ id: number; label: string; url: string }>; log: Array<{ ts: string; text: string }>; jobs: { line_edit: Job | null; youtube_prep: Job | null }; has_model: boolean }
+interface Full extends Brief { notes: string | null; outline: string | null; outline_from: string | null; outline_url: string | null; video_id: string | null; folder: string | null; next_stage: { id: string; name: string } | null; stages: Array<{ id: string; name: string; state: string }>; link_list: Array<{ id: number; label: string; url: string }>; log: Array<{ ts: string; text: string }>; jobs: { line_edit: Job | null; youtube_prep: Job | null; check: Job | null }; has_model: boolean }
 interface Episode { id: number; day: string; file: { name: string; size: number } | null; takes: Array<{ text: string; ts: string; asked: string | null }>; report: string | null; job: { status: string; reply: string | null } | null; has_model: boolean }
 
 const when = (iso: string) => new Date(iso).toLocaleDateString("en", { month: "short", day: "numeric" });
@@ -26,16 +26,21 @@ type In = { go: (s: Screen) => void; onError: (m: string) => void; stt: boolean 
 const Bars = ({ n, total = 6 }: { n: number; total?: number }) => (
   <span className="bars" role="img" aria-label={`Stage ${n} of ${total}`}>{Array.from({ length: total }, (_, i) => <span key={i} className={i + 1 < n ? "done" : i + 1 === n ? "now" : ""} />)}</span>
 );
-const Sub = ({ title, eyebrow, go, right }: { title: string; eyebrow?: string; go: (s: Screen) => void; right?: ReactNode }) => (
-  <div className="screen-head"><button className="btn ghost back" onClick={() => go({ at: "home" })}>‹ Work</button><div className="screen-title">{eyebrow && <span className="eyebrow">{eyebrow}</span>}<h1>{title}</h1></div><div className="screen-right">{right}</div></div>
+const Sub = ({ title, eyebrow, go, right }: { title: ReactNode; eyebrow?: string; go: (s: Screen) => void; right?: ReactNode }) => (
+  <div className="screen-head"><button className="btn ghost back" onClick={() => go({ at: "home" })}>‹ Work</button><div className="screen-title">{eyebrow && <span className="eyebrow">{eyebrow}</span>}{typeof title === "string" ? <h1>{title}</h1> : title}</div><div className="screen-right">{right}</div></div>
 );
+const docName = (url: string) => (/docs\.google\.com\/document/.test(url) ? "Google Doc" : /drive\.google\.com/.test(url) ? "Drive file" : new URL(url).hostname);
 
 /* ---------- Work home ---------- */
-function HomeScreen({ go, onError, onBack }: In & { onBack: () => void }) {
+function HomeScreen({ go, onError, onBack, stt }: In & { onBack: () => void }) {
   const [h, setH] = useState<Home | null>(null);
   const [adding, setAdding] = useState<null | "one" | "list">(null);
   const [title, setTitle] = useState("");
   const [list, setList] = useState("");
+  const [underway, setUnderway] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [doomed, setDoomed] = useState<number | null>(null);
+  const d = useDictation(stt, (said) => setUnderway((x) => (x ? `${x} ${said}` : said)), onError);
   const [all, setAll] = useState(false);
   const [tasks, setTasks] = useState<Array<{ id: number; title: string }> | null>(null);
   const drag = useRef<number | null>(null);
@@ -56,12 +61,21 @@ function HomeScreen({ go, onError, onBack }: In & { onBack: () => void }) {
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const r = await call<{ added: number; tutorial: Brief }>("/api/work/tutorials", json("POST", adding === "list" ? { list, source: "a pasted list" } : { title }));
-      setTitle(""); setList(""); setAdding(null);
-      if (adding === "one" && r.added) go({ at: "tutorial", id: r.tutorial.id }); else load();
+      const r = await call<{ added: number; tutorial: Brief; problem: string | null }>("/api/work/tutorials", json("POST", adding === "list" ? { list, source: "a pasted list" } : { title, underway: underway?.trim() || undefined }));
+      setTitle(""); setList(""); setUnderway(null); setAdding(null);
+      if (r.problem) onError(r.problem);
+      if (adding === "one") go({ at: "tutorial", id: r.tutorial.id }); else load();
     } catch (err) { onError((err as Error).message); }
   };
-  const shown = all ? h.up_next : h.up_next.slice(0, 5);
+  const rename = async (t: Brief, to: string) => {
+    if (!to.trim() || to.trim() === t.title) return;
+    try { await call(`/api/work/tutorials/${t.id}`, json("PATCH", { title: to })); load(); } catch (e) { onError((e as Error).message); load(); }
+  };
+  const remove = async (id: number) => {
+    setDoomed(null);
+    try { await call(`/api/work/tutorials/${id}`, { method: "DELETE" }); load(); } catch (e) { onError((e as Error).message); }
+  };
+  const shown = all || editing ? h.up_next : h.up_next.slice(0, 5);
   const firstHot = h.in_motion[0]?.id;
 
   return (
@@ -85,20 +99,39 @@ function HomeScreen({ go, onError, onBack }: In & { onBack: () => void }) {
       </section>
 
       <section className="stack">
-        <div className="row"><span className="eyebrow grow">Up next · {h.up_next.length}</span><button className="btn ghost" onClick={() => setAdding(adding === "one" ? null : "one")}>+ Idea</button><button className="btn ghost" onClick={() => setAdding(adding === "list" ? null : "list")}>Paste a list</button></div>
+        <div className="row"><span className="eyebrow grow">Up next · {h.up_next.length}</span>{editing ? <button className="btn" onClick={() => { setEditing(false); setDoomed(null); }}>Done</button> : <><button className="btn ghost" onClick={() => setAdding(adding === "one" ? null : "one")}>+ Add</button><button className="btn ghost" onClick={() => setAdding(adding === "list" ? null : "list")}>Paste a list</button>{h.up_next.length > 0 && <button className="btn ghost" onClick={() => { setEditing(true); setAdding(null); }}>Edit</button>}</>}</div>
         {adding && (
           <form className="card pad form" onSubmit={add}>
             {adding === "one" ? (
-              <><label htmlFor="ti" className="eyebrow">Tutorial idea</label><input id="ti" className="plain-input" type="text" required autoFocus value={title} onChange={(e) => setTitle(e.target.value)} /></>
+              <>
+                <label htmlFor="ti" className="eyebrow">Tutorial</label><input id="ti" className="plain-input" type="text" required autoFocus value={title} onChange={(e) => setTitle(e.target.value)} />
+                {underway === null ? <button type="button" className="linkish" style={{ alignSelf: "flex-start" }} onClick={() => setUnderway("")}>Already underway? Say what's done</button> : (
+                  <>
+                    <label htmlFor="uw" className="eyebrow">What's done so far</label>
+                    <div className="row" style={{ alignItems: "flex-start" }}>
+                      <textarea id="uw" className="plain grow" placeholder={d.recording ? `Listening… ${d.clock}` : d.busy ? "Writing it down…" : "e.g. Recorded last week and uploaded as private. Hermes finds the outline, footage and upload."} value={underway} onChange={(e) => setUnderway(e.target.value)} />
+                      <MicButton d={d} small />
+                    </div>
+                  </>
+                )}
+              </>
             ) : (
               <><label htmlFor="tl" className="eyebrow">One idea per line</label><textarea id="tl" className="plain tall" required value={list} onChange={(e) => setList(e.target.value)} placeholder="Paste from Daniel's doc or anywhere else. Ones already on the list are skipped." /></>
             )}
-            <div className="row"><button className="btn" type="submit">Add</button><button className="btn ghost" type="button" onClick={() => setAdding(null)}>Cancel</button></div>
+            <div className="row"><button className="btn" type="submit">{underway?.trim() ? "Add and have Hermes check" : "Add"}</button><button className="btn ghost" type="button" onClick={() => { setAdding(null); setUnderway(null); }}>Cancel</button></div>
           </form>
         )}
         {h.up_next.length === 0 && !adding && <p className="muted small">No ideas yet. Add one, paste a list, or ask Hermes to send its list over.</p>}
         <ol className="ideas">
-          {shown.map((t, i) => (
+          {shown.map((t, i) => editing ? (
+            <li key={t.id} className="editing">
+              <label htmlFor={`rn${t.id}`} className="sr">Rename {t.title}</label>
+              <input id={`rn${t.id}`} className="plain-input grow" type="text" defaultValue={t.title} onBlur={(e) => rename(t, e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
+              {doomed === t.id
+                ? <><button className="btn danger" onClick={() => remove(t.id)}>Delete</button><button className="btn ghost" onClick={() => setDoomed(null)}>Keep</button></>
+                : <button className="btn ghost" aria-label={`Delete ${t.title}`} onClick={() => setDoomed(t.id)}>✕</button>}
+            </li>
+          ) : (
             <li key={t.id} draggable onDragStart={() => { drag.current = t.id; }} onDragOver={(e) => e.preventDefault()} onDrop={() => { if (drag.current !== null) move(drag.current, h.up_next.findIndex((x) => x.id === t.id)); drag.current = null; }}>
               <span className="grip" aria-hidden="true"><svg width="14" height="22" viewBox="0 0 14 22" fill="currentColor"><circle cx="3" cy="3" r="2" /><circle cx="11" cy="3" r="2" /><circle cx="3" cy="11" r="2" /><circle cx="11" cy="11" r="2" /><circle cx="3" cy="19" r="2" /><circle cx="11" cy="19" r="2" /></svg></span>
               <span className="idea-n">{i + 1}</span>
@@ -111,7 +144,8 @@ function HomeScreen({ go, onError, onBack }: In & { onBack: () => void }) {
             </li>
           ))}
         </ol>
-        {h.up_next.length > 5 && <button className="more" onClick={() => setAll(!all)}>{all ? "Show the top five" : `Show the other ${h.up_next.length - 5}`}</button>}
+        {editing && <p className="muted small" style={{ margin: 0 }}>Tap a name to rename it. Deleting removes its notes, links and outline for good.</p>}
+        {h.up_next.length > 5 && !editing && <button className="more" onClick={() => setAll(!all)}>{all ? "Show the top five" : `Show the other ${h.up_next.length - 5}`}</button>}
       </section>
 
       <div className="row">
@@ -136,25 +170,30 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
   const [notes, setNotes] = useState<string | null>(null);
   const [outline, setOutline] = useState<string | null>(null);
   const [showOutline, setShowOutline] = useState(false);
+  const [docLink, setDocLink] = useState<string | null>(null);
   const [link, setLink] = useState<{ label: string; url: string } | null>(null);
   const [reply, setReply] = useState("");
   const [details, setDetails] = useState(false);
-  const [sure, setSure] = useState(false);
+  const [edit, setEdit] = useState<null | { title: string; sure: boolean }>(null);
+  const [check, setCheck] = useState<string | null>(null);
   const load = useCallback(() => call<Full>(`/api/work/tutorials/${id}`).then(setT).catch((e) => onError(e.message)), [id, onError]);
   useEffect(() => { load(); }, [load]);
-  const busyJob = t?.jobs.line_edit?.status === "working" || t?.jobs.youtube_prep?.status === "working";
+  const busyJob = Boolean(t && Object.values(t.jobs).some((j) => j?.status === "working"));
   useEffect(() => { if (!busyJob) return; const i = setInterval(load, 4000); return () => clearInterval(i); }, [busyJob, load]);
   const d = useDictation(stt, (said) => setNotes((x) => ((x ?? t?.notes ?? "") ? `${x ?? t?.notes}\n${said}` : said)), onError);
+  const dc = useDictation(stt, (said) => setCheck((x) => (x ? `${x} ${said}` : said)), onError);
   if (!t) return <p className="muted">Loading…</p>;
   const act = async (fn: () => Promise<unknown>) => { try { await fn(); await load(); } catch (e) { onError((e as Error).message); } };
   const patch = (body: unknown) => act(() => call(`/api/work/tutorials/${id}`, json("PATCH", body)));
   const run = (skill: string, say?: string) => act(async () => { await call(`/api/work/tutorials/${id}/run`, json("POST", { skill, say })); setReply(""); });
+  const ask = (body: { say?: string; find?: "outline" }) => act(async () => { await call(`/api/work/tutorials/${id}/check`, json("POST", body)); setCheck(null); });
   const skill = t.stage === "line_edit" ? "line_edit" : t.stage === "youtube_prep" ? "youtube_prep" : null;
   const job = skill ? t.jobs[skill] : null;
+  const checking = t.jobs.check?.status === "working";
 
   const next = () => {
     if (t.filed_at) return <><span className="work-title">Filed away</span><div className="row"><button className="btn" onClick={() => patch({ filed: false })}>Bring it back</button></div></>;
-    if (t.stage === "idea") return <><span className="work-title">Outline it</span><span className="muted">Talk it through with Claude and say "save the outline to Life Architect", or paste one in below.</span><div className="row"><button className="btn primary" onClick={() => { setOutline(t.outline ?? ""); setShowOutline(true); }}>Write or paste the outline</button></div></>;
+    if (t.stage === "idea") return <><span className="work-title">Outline it</span><span className="muted">Talk it through with Claude and say "save the outline to Life Architect", or link the Google Doc below.</span></>;
     if (t.stage === "outline") return <><span className="work-title">Finish the outline</span><span className="muted">When the outline is ready to shoot from, move it on.</span><div className="row"><button className="btn primary" onClick={() => patch({ stage: "record" })}>Outline is ready</button></div></>;
     if (t.stage === "record") return <><span className="work-title">Record</span><span className="muted">Mark it once the footage is on the Mac.</span><div className="row"><button className="btn primary" onClick={() => patch({ stage: "line_edit" })}>It's recorded</button></div></>;
     if (t.stage === "live") return <><span className="work-title">It's live</span><div className="row"><button className="btn primary" onClick={() => act(async () => { await call(`/api/work/tutorials/${id}`, json("PATCH", { filed: true })); go({ at: "home" }); })}>File it away</button></div></>;
@@ -162,9 +201,7 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
     return (
       <>
         <span className="work-title">{isEdit ? "Line edit" : "YouTube prep"}</span>
-        <span className="muted">{isEdit ? "Hermes stitches the takes against the outline and puts a rough cut in Drive for Daniel. It takes a while, and its questions and the finished link come to you on Telegram." : "Hermes writes the titles, description, chapters and tags from the private upload and sets them on YouTube as private."}</span>
-        {isEdit && !t.folder && <span className="small accent">It'll look for footage under the tutorial's title. If the folder on the Mac is named differently, set it under Details first.</span>}
-        {!isEdit && !t.video_id && <span className="small accent">No video ID set. Hermes will try to match by title; add the ID under Details for a sure match.</span>}
+        <span className="muted">{isEdit ? "Hermes finds the footage folder in Movies on the M5 Max, stitches the takes against the outline and puts a rough cut in Drive for Daniel. Its questions and the finished link come to you on Telegram." : "Hermes finds the upload on the channel, then writes the titles, description, chapters and tags and sets them on YouTube as private."}</span>
         {job?.status === "working" ? <span className="electro" role="status">Hermes is working on it…</span> : (
           <div className="row">
             <button className="btn primary" disabled={!t.has_model} onClick={() => run(skill!)}>{job ? `Run ${isEdit ? "line edit" : "YouTube prep"} again` : `Run ${isEdit ? "line edit" : "YouTube prep"}`}</button>
@@ -183,9 +220,25 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
     );
   };
 
+  const renameForm = edit && (
+    <form className="row" onSubmit={(e) => { e.preventDefault(); act(async () => { await call(`/api/work/tutorials/${id}`, json("PATCH", { title: edit.title })); setEdit(null); }); }}>
+      <label htmlFor="tt" className="sr">Tutorial name</label>
+      <input id="tt" className="plain-input grow" type="text" autoFocus value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} />
+      <button className="btn" type="submit" disabled={!edit.title.trim() || edit.title.trim() === t.title}>Rename</button>
+    </form>
+  );
+
   return (
     <div className="stack work">
-      <Sub title={t.title} eyebrow="Sovereign Sessions" go={go} />
+      <Sub title={t.title} eyebrow="Sovereign Sessions" go={go} right={edit ? <button className="btn ghost" onClick={() => setEdit(null)}>Cancel</button> : <button className="btn ghost" onClick={() => setEdit({ title: t.title, sure: false })}>Edit</button>} />
+      {edit && (
+        <div className="card pad form">
+          {renameForm}
+          <div className="row">
+          {!edit.sure ? <button className="btn ghost danger" onClick={() => setEdit({ ...edit, sure: true })}>Delete this tutorial…</button> : <><span className="accent small grow">This removes it and its notes, links and outline for good.</span><button className="btn danger" onClick={() => act(async () => { await call(`/api/work/tutorials/${id}`, { method: "DELETE" }); go({ at: "home" }); })}>Yes, delete</button><button className="btn ghost" onClick={() => setEdit({ ...edit, sure: false })}>Keep</button></>}
+          </div>
+        </div>
+      )}
       <div className="stage-track">
         <Bars n={t.stage_number} />
         <div className="stage-names">{t.stages.map((s) => <button key={s.id} className={s.state} aria-label={`Move to ${s.name}`} aria-current={s.state === "now" ? "step" : undefined} onClick={() => s.state !== "now" && patch({ stage: s.id })}>{s.name.replace("YouTube", "YT")}</button>)}</div>
@@ -193,10 +246,50 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
 
       <section className="card pad hot stack"><span className="eyebrow accent">Next step</span>{next()}</section>
 
+      {!t.filed_at && (
+        <section className="stack">
+          {checking ? <p className="electro" role="status" style={{ margin: 0 }}>Hermes is checking where it stands…</p> : check === null ? (
+            <button className="linkish" style={{ alignSelf: "flex-start" }} onClick={() => setCheck("")}>Already further along? Have Hermes check</button>
+          ) : (
+            <div className="card pad form">
+              <label htmlFor="ck" className="eyebrow">What's done</label>
+              <div className="row" style={{ alignItems: "flex-start" }}>
+                <textarea id="ck" className="plain grow" placeholder={dc.recording ? `Listening… ${dc.clock}` : dc.busy ? "Writing it down…" : "e.g. Recorded Tuesday, Daniel has the rough cut. Leave blank to have Hermes work it out."} value={check} onChange={(e) => setCheck(e.target.value)} />
+                <MicButton d={dc} small />
+              </div>
+              <span className="muted small">Hermes looks for the outline in Drive, the footage folder on the M5 Max and the upload on YouTube, then moves the tutorial to where it really is. It won't start an edit.</span>
+              <div className="row"><button className="btn primary" disabled={!t.has_model} onClick={() => ask({ say: check })}>Check with Hermes</button><button className="btn ghost" onClick={() => setCheck(null)}>Cancel</button></div>
+            </div>
+          )}
+          {t.jobs.check && t.jobs.check.status !== "working" && t.jobs.check.reply && check === null && <details className={t.jobs.check.status === "failed" ? "hermes-says accent" : "hermes-says"}><summary className="eyebrow electro">Hermes's last check · {when(t.jobs.check.created_at)}</summary>{t.jobs.check.reply}</details>}
+        </section>
+      )}
+
       <section className="stack">
         <span className="eyebrow">Outline</span>
-        {t.outline && !showOutline && <button className="card pad work-row" onClick={() => { setOutline(t.outline); setShowOutline(true); }}><span className="grow"><strong>Outline</strong><span className="muted small block">From {t.outline_from ?? "you"}</span></span><span className="muted">›</span></button>}
-        {!t.outline && !showOutline && <button className="more" onClick={() => { setOutline(""); setShowOutline(true); }}>No outline yet. Write or paste one</button>}
+        {t.outline_url && docLink === null && (
+          <div className="card work-row">
+            <a className="grow" href={t.outline_url} target="_blank" rel="noreferrer"><strong>Outline</strong><span className="muted small block">{docName(t.outline_url)} · opens in a new tab</span></a>
+            <button className="btn ghost" onClick={() => setDocLink(t.outline_url)}>Change</button>
+          </div>
+        )}
+        {docLink !== null && (
+          <form className="card pad form" onSubmit={(e) => { e.preventDefault(); act(async () => { await call(`/api/work/tutorials/${id}`, json("PATCH", { outline_url: docLink })); setDocLink(null); }); }}>
+            <label htmlFor="dl" className="eyebrow">Google Doc link</label>
+            <input id="dl" className="plain-input" type="url" autoFocus autoCapitalize="off" placeholder="https://docs.google.com/document/…" value={docLink} onChange={(e) => setDocLink(e.target.value)} />
+            <div className="row"><button className="btn" type="submit" disabled={!docLink.trim()}>Save link</button>{t.outline_url && <button className="btn ghost" type="button" onClick={() => act(async () => { await call(`/api/work/tutorials/${id}`, json("PATCH", { outline_url: "" })); setDocLink(null); })}>Unlink</button>}<button className="btn ghost" type="button" onClick={() => setDocLink(null)}>Cancel</button></div>
+          </form>
+        )}
+        {!t.outline_url && docLink === null && (
+          checking && t.log[0]?.text.includes("find the outline") ? <p className="electro" role="status" style={{ margin: 0 }}>Hermes is looking in Drive…</p> : (
+            <div className="row">
+              <button className="btn primary grow" disabled={!t.has_model || checking} onClick={() => ask({ find: "outline" })}>Find it in Drive</button>
+              <button className="btn grow" onClick={() => setDocLink("")}>Link a Google Doc</button>
+            </div>
+          )
+        )}
+        {t.outline && !showOutline && <button className="card pad work-row" onClick={() => { setOutline(t.outline); setShowOutline(true); }}><span className="grow"><strong>Outline notes</strong><span className="muted small block">From {t.outline_from ?? "you"}</span></span><span className="muted">›</span></button>}
+        {!t.outline && !t.outline_url && !showOutline && <button className="more" onClick={() => { setOutline(""); setShowOutline(true); }}>Or write the outline here</button>}
         {showOutline && (
           <div className="card pad form">
             <label htmlFor="ol" className="sr">Outline</label>
@@ -237,15 +330,12 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
         <button className="linkish" aria-expanded={details} onClick={() => setDetails(!details)}>Details and history {details ? "▾" : "▸"}</button>
         {details && (
           <div className="card pad form">
+            <p className="muted small" style={{ margin: 0 }}>Hermes finds the footage folder and the upload itself, and fills these in when it does. Change them only if it picked the wrong one.</p>
             <div className="fields">
-              <label htmlFor="fd">Footage folder on the Mac (for line edit)<input id="fd" type="text" defaultValue={t.folder ?? ""} placeholder={t.title} onBlur={(e) => e.target.value !== (t.folder ?? "") && patch({ folder: e.target.value })} /></label>
-              <label htmlFor="vd">YouTube video ID (for YouTube prep)<input id="vd" type="text" autoCapitalize="off" defaultValue={t.video_id ?? ""} onBlur={(e) => e.target.value !== (t.video_id ?? "") && patch({ video_id: e.target.value })} /></label>
-              <label htmlFor="tt">Title<input id="tt" type="text" defaultValue={t.title} onBlur={(e) => e.target.value.trim() && e.target.value !== t.title && patch({ title: e.target.value })} /></label>
+              <label htmlFor="fd">Footage folder in Movies on the M5 Max<input id="fd" type="text" defaultValue={t.folder ?? ""} placeholder="Hermes will find it" onBlur={(e) => e.target.value !== (t.folder ?? "") && patch({ folder: e.target.value })} /></label>
+              <label htmlFor="vd">YouTube upload (link or video ID)<input id="vd" type="text" autoCapitalize="off" defaultValue={t.video_id ?? ""} placeholder="Hermes will find it" onBlur={(e) => e.target.value !== (t.video_id ?? "") && patch({ video_id: e.target.value })} /></label>
             </div>
             <ul className="list">{t.log.map((l, i) => <li key={i}><span className="when small muted">{when(l.ts)}</span><span className="grow small">{l.text}</span></li>)}</ul>
-            <div className="row">
-              {!sure ? <button className="btn ghost" onClick={() => setSure(true)}>Delete this tutorial…</button> : <><span className="accent small grow">This removes it and its notes, links and outline for good.</span><button className="btn" onClick={() => act(async () => { await call(`/api/work/tutorials/${id}`, { method: "DELETE" }); go({ at: "home" }); })}>Yes, delete</button><button className="btn ghost" onClick={() => setSure(false)}>Keep</button></>}
-            </div>
           </div>
         )}
       </section>

@@ -16,6 +16,7 @@ interface Deck {
     list: () => Array<{ title: string; stage: string; has_outline: boolean }>;
     addIdea: (title: string, notes?: string) => { row: any; created: boolean } | null;
     saveOutline: (name: string, outline: string, create: boolean) => string | null;
+    check: (name: string, done: string) => { ok: boolean; text: string };
   };
 }
 const PEOPLE = /^\s*people\s*[:,\-]/i;
@@ -23,7 +24,7 @@ const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
 function build(app: Deck, token: string) {
   const server = new McpServer({ name: "life-architect", version: "1.0.0" }, {
-    instructions: "Ben's Life Architect deck on his own server. Use `do` for anything he wants added, changed, logged or handled, passing his own words. Use `whats_next` when he asks what's on his plate. For tutorials: `tutorials` lists them, `add_tutorial_idea` adds one, and after talking an outline through with him, save it with `save_tutorial_outline`. Never send notes about people or relationships here; tell him to add those in the app's People section himself. Emails are only ever drafted: tell him to open the app to send.",
+    instructions: "Ben's Life Architect deck on his own server. Use `do` for anything he wants added, changed, logged or handled, passing his own words. Use `whats_next` when he asks what's on his plate. For tutorials: `tutorials` lists them, `add_tutorial_idea` adds one, after talking an outline through with him, save it with `save_tutorial_outline`, and when he asks to check on a tutorial or says how far along one is, use `check_tutorial`. Never send notes about people or relationships here; tell him to add those in the app's People section himself. Emails are only ever drafted: tell him to open the app to send.",
   });
   const auth = { authorization: `Bearer ${token}` };
   const get = async (path: string) => (await app.request(path, { headers: auth })).json() as Promise<any>;
@@ -81,6 +82,12 @@ function build(app: Deck, token: string) {
     const r = app.work.addIdea(title, notes);
     return text(!r ? "Not added: it needs a title." : r.created ? `Added to the tutorial list: ${r.row.title}` : `Already on the list: ${r.row.title}`);
   });
+
+  server.registerTool("check_tutorial", {
+    title: "Check on a tutorial",
+    description: "Has his assistant Hermes check where a tutorial stands and fill it in: the outline Google Doc in Drive, the footage folder on his Mac, the upload on YouTube. Pass what he says is already done. A tutorial not on the list yet is added. Hermes works in the background; tell him the results land on the tutorial in Life Architect's Work area.",
+    inputSchema: { tutorial: z.string().min(2).max(160).describe("The tutorial's title, from the `tutorials` list when it's there"), done: z.string().max(2000).optional().describe("What he says is done, in his words, e.g. 'recorded Tuesday, uploaded as private'") },
+  }, async ({ tutorial, done }) => text(app.work.check(tutorial, done ?? "").text));
 
   server.registerTool("save_tutorial_outline", {
     title: "Save a tutorial outline",

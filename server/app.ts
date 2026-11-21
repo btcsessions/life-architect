@@ -320,7 +320,7 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
   const asks = mountAsks(app, ctx);
   startAsk = asks.start;
   openAsks = asks.open;
-  commands = mountCommands(app, ctx, { addTx: money.addTx, peopleDrop: people.drop });
+  commands = mountCommands(app, ctx, { addTx: money.addTx, peopleDrop: people.drop, tutorialCheck: work.check });
 
   return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected, syncBtc: money.syncBtc, hasWallets: money.hasWallets, capture, relayToken: () => secret.get("relay_token"), work });
 }
