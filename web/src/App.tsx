@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, call, json, dueLabel, type Ask, type Did, type AreaView, type Config, type Deck, type Task } from "./api";
 import { SettingsPanel } from "./Settings";
 import { Travel } from "./Travel";
+import { Work } from "./Work";
 import { Money } from "./Money";
 import { People } from "./People";
 import { Inbox } from "./Inbox";
 
 /** Areas that have their own full screen. */
-const SCREENS: Record<string, string> = { travel: "Trips", money: "Money", people: "People", inbox: "Inbox" };
+const SCREENS: Record<string, string> = { work: "Work", travel: "Trips", money: "Money", people: "People", inbox: "Inbox" };
 
 const ICONS: Record<string, string> = {
   work: "M4 4h12a2 2 0 012 2v7a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zM8.5 7.5v4l3.5-2z",
@@ -108,6 +109,7 @@ export function App() {
         </div>
       )}
 
+      {view === "work" && <Work onBack={back} onError={setError} stt={Boolean(config?.stt)} />}
       {view === "travel" && <Travel onBack={back} onError={setError} />}
       {view === "money" && <Money onBack={back} onError={setError} />}
       {view === "people" && <People onBack={back} onError={setError} stt={Boolean(config?.stt)} />}

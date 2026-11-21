@@ -247,3 +247,32 @@ textarea.tall { min-height: 180px; }
 .pdf-rows td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .pdf-rows td:first-child { white-space: nowrap; }
 .chip-x { background: none; border: 0; color: var(--label-2); padding: 0 0 0 6px; min-width: 28px; min-height: 28px; }
+
+/* Work */
+.work .work-card { display: flex; flex-direction: column; gap: 14px; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--separator); border-radius: var(--r-tile); color: var(--label); }
+.work .work-card.hot, .work .card.hot { border-color: var(--accent); }
+.work-title { font-family: "Bebas Neue", sans-serif; font-size: 28px; letter-spacing: 0.5px; line-height: 1; overflow-wrap: anywhere; }
+.bars { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.bars span { height: 6px; border-radius: 3px; background: var(--separator); }
+.bars .done { background: var(--electro); }
+.bars .now { background: var(--accent); }
+.stage-track { display: flex; flex-direction: column; gap: 4px; }
+.stage-track .bars span { height: 8px; border-radius: 4px; }
+.stage-names { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.stage-names button { min-height: 44px; padding: 0; background: none; border: 0; color: var(--label-2); font: inherit; font-size: 11px; text-align: center; }
+.stage-names button.now { color: var(--accent); font-weight: 700; }
+.btn.primary { background: var(--accent); color: #0d101c; border-color: var(--accent); }
+.btn.primary:disabled { opacity: 0.5; }
+.wide { width: 100%; justify-content: center; }
+.ideas { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ideas li { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 4px 6px 4px 14px; background: var(--card); border: 1px solid var(--separator); border-radius: var(--r-tile); }
+.ideas .grip { color: var(--label-3); cursor: grab; display: flex; }
+.idea-n { font-family: "Bebas Neue", sans-serif; font-size: 22px; color: var(--label-3); width: 22px; }
+.idea-open { min-height: 52px; background: none; border: 0; color: var(--label); font: inherit; text-align: left; padding: 4px 0; overflow-wrap: anywhere; }
+.nudge { min-width: 40px; padding: 0; }
+.more { min-height: 48px; width: 100%; background: transparent; border: 1px dashed var(--label-3); border-radius: var(--r-tile); color: var(--label-2); font: inherit; font-weight: 600; }
+.work-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 60px; padding: 8px 16px; text-align: left; color: var(--label); background: var(--card); border: 1px solid var(--separator); border-radius: var(--r-tile); overflow-wrap: anywhere; }
+.work-row a { color: var(--label); text-decoration: none; }
+.hermes-says { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; background: var(--card-2); border-radius: var(--r-tile); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; max-height: 420px; overflow: auto; }
+textarea.outline { min-height: 320px; width: 100%; line-height: 1.5; }
+.hook { white-space: pre-wrap; line-height: 1.6; font-size: 16px; overflow-wrap: anywhere; }

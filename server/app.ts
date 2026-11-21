@@ -11,6 +11,7 @@ import { mountPeople } from "./people.ts";
 import { mountMail, type MailFactory } from "./mail.ts";
 import { mountNoticed } from "./noticed.ts";
 import { mountAsks } from "./asks.ts";
+import { mountWork } from "./work.ts";
 import { mountCommands, ROUTER, ACTION_KINDS, type Did } from "./commands.ts";
 
 /** Settings the user can change in the app. Each falls back to the environment variable of the same name. */
@@ -315,10 +316,11 @@ export function createApp(db: Db, now: () => Date = () => new Date(), deps: { ma
   const mail = mountMail(app, ctx, deps.mail);
   mailWaiting = mail.waiting;
   mountNoticed(app, ctx);
+  const work = mountWork(app, ctx);
   const asks = mountAsks(app, ctx);
   startAsk = asks.start;
   openAsks = asks.open;
   commands = mountCommands(app, ctx, { addTx: money.addTx, peopleDrop: people.drop });
 
-  return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected, syncBtc: money.syncBtc, hasWallets: money.hasWallets, capture, relayToken: () => secret.get("relay_token") });
+  return Object.assign(app, { syncMail: mail.sync, mailConnected: mail.connected, syncBtc: money.syncBtc, hasWallets: money.hasWallets, capture, relayToken: () => secret.get("relay_token"), work });
 }

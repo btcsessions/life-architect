@@ -32,14 +32,14 @@ describe("the connector Claude uses from the phone", () => {
     for (let i = 0; i < 8; i++) expect((await realFetch(url, { method: "POST", headers: { ...J, authorization: "Bearer nope" }, body: "{}" })).status).toBe(401);
     expect((await realFetch(url, { method: "GET" })).status).toBe(401);
     const c = await connect(token); // still gets in after a stranger's wrong guesses
-    expect((await c.listTools()).tools.length).toBe(4);
+    expect((await c.listTools()).tools.length).toBe(7);
     await c.close(); http.close();
   });
 
   it("adds tasks, reads what's next, and keeps People out", async () => {
     const { app, token, http, connect } = await setup();
     const c = await connect(token);
-    expect((await c.listTools()).tools.map((t) => t.name).sort()).toEqual(["do", "handoff_summary", "inbox", "whats_next"]);
+    expect((await c.listTools()).tools.map((t) => t.name).sort()).toEqual(["add_tutorial_idea", "do", "handoff_summary", "inbox", "save_tutorial_outline", "tutorials", "whats_next"]);
     const added = said(await c.callTool({ name: "do", arguments: { text: "Finish the YubiKey outline by Friday, important. Ask Nathan to redo the thumbnail" } }));
     expect(added).toContain("Finish the YubiKey outline");
     expect(added).toContain("handed to Nathan");

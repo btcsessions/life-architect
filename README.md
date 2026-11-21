@@ -12,6 +12,9 @@ One deck for everything on your plate, served from your Umbrel and reached over 
   hand it off, make a task, give it to Hermes). Email is drafted and waits for a Send tap. Start with "People:" to
   drop a note straight into People without any model reading it. The module screens are for detail and control.
 - **Modules**: Work, Travel & Speaking, Family, Health, Inbox, Hobbies & Learning, Build & Automate, Money, People.
+- **Work**: the tutorial pipeline (ideas you can reorder, then Outline, Record, Line edit, YouTube prep, Live), each
+  with notes, links and its outline, plus Bitcast prep from a rundown PDF with intro-hook takes. Line edit, YouTube
+  prep and Bitcast prep are Hermes's own skills, triggered from here.
 - **Travel**: trips with flights, stay, costs, documents and a schedule you can send to Google Calendar.
 - **Inbox**: reads Gmail with an app password, sorts it (for you / hand off / couldn't place / nothing to do),
   writes replies from what you say, and hands mail to people by email. Nothing is sent without a tap. It learns

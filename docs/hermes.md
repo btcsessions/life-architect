@@ -20,6 +20,23 @@ Every call sends the header `Authorization: Bearer <token>`.
 
 `source` is a label you choose (`claude`, `chatgpt`, `telegram`), shown beside the item in "Added elsewhere".
 
+## The Work area: tutorials and Bitcast
+
+| Call | What it does |
+| --- | --- |
+| `POST /api/relay/tutorials` with `{"source": "Hermes list", "items": [{"title": "...", "notes": "...", "links": [{"label": "...", "url": "..."}]}]}` | Adds tutorial ideas to the Up next list. Titles already there are skipped, so it can be re-run. |
+| `GET /api/relay/tutorials` | The open tutorials with their stage. |
+| `POST /api/relay/tutorial-update` with `{"title": "...", "stage": "youtube_prep", "note": "...", "link": "https://..."}` | Reports progress on one tutorial: moves its stage, adds a line to its history, attaches a link. Stages: `idea`, `outline`, `record`, `line_edit`, `youtube_prep`, `live`. |
+
+Life Architect triggers Hermes's own skills by sending the same words you would:
+
+- **Bitcast prep**: the API can't carry attachments, so the app tells Hermes where to download the rundown PDF
+  (`/api/work/handover/<long random token>.pdf` on this app) and asks for the intro between `<<<INTRO` and `INTRO>>>`.
+- **YouTube prep**: `YouTube prep for "<title>"`, with the video ID when it's set. Replies are resent with the whole
+  conversation, because the API keeps no memory between calls.
+- **Line edit**: `Line edit <footage folder or title>`. The app only starts it; questions and the finished link still
+  come on Telegram, and Hermes is asked to call `tutorial-update` when it's done.
+
 ## A skill to give Hermes
 
 Paste this into Hermes as a skill or standing instruction, with the token filled in on the Umbrel:

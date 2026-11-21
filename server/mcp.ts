@@ -12,13 +12,18 @@ interface Deck {
   request: (path: string, init?: RequestInit) => Response | Promise<Response>;
   capture: (text: string, source: string, opts?: { tasksOnly?: boolean; full?: boolean }) => Promise<{ created: any[]; asked: any[]; did: any[] }>;
   relayToken: () => string | null;
+  work: {
+    list: () => Array<{ title: string; stage: string; has_outline: boolean }>;
+    addIdea: (title: string, notes?: string) => { row: any; created: boolean } | null;
+    saveOutline: (name: string, outline: string, create: boolean) => string | null;
+  };
 }
 const PEOPLE = /^\s*people\s*[:,\-]/i;
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
 function build(app: Deck, token: string) {
   const server = new McpServer({ name: "life-architect", version: "1.0.0" }, {
-    instructions: "Ben's Life Architect deck on his own server. Use `do` for anything he wants added, changed, logged or handled, passing his own words. Use `whats_next` when he asks what's on his plate. Never send notes about people or relationships here; tell him to add those in the app's People section himself. Emails are only ever drafted: tell him to open the app to send.",
+    instructions: "Ben's Life Architect deck on his own server. Use `do` for anything he wants added, changed, logged or handled, passing his own words. Use `whats_next` when he asks what's on his plate. For tutorials: `tutorials` lists them, `add_tutorial_idea` adds one, and after talking an outline through with him, save it with `save_tutorial_outline`. Never send notes about people or relationships here; tell him to add those in the app's People section himself. Emails are only ever drafted: tell him to open the app to send.",
   });
   const auth = { authorization: `Bearer ${token}` };
   const get = async (path: string) => (await app.request(path, { headers: auth })).json() as Promise<any>;
@@ -57,6 +62,33 @@ function build(app: Deck, token: string) {
     if (!b.connected) return text("Email isn't connected in Life Architect yet.");
     const list = (title: string, items: any[]) => `${title} (${items.length}):\n${items.slice(0, 12).map((m) => `- ${m.from_name}: ${m.subject}${m.summary ? ` — ${m.summary}` : ""}${m.suggest_name ? ` [suggested: hand to ${m.suggest_name}]` : ""}`).join("\n") || "- none"}`;
     return text([list("For him", b.you), list("To hand off", b.handoff), list("Couldn't place", b.unsure)].join("\n\n"));
+  });
+
+  server.registerTool("tutorials", {
+    title: "His tutorial list",
+    description: "Open tutorials in Life Architect's Work area: those in production first (with their stage), then ideas in his chosen order.",
+    inputSchema: {},
+  }, async () => {
+    const list = app.work.list();
+    return text(list.length ? list.map((t) => `- ${t.title} (${t.stage}${t.has_outline ? ", has outline" : ""})`).join("\n") : "The tutorial list is empty.");
+  });
+
+  server.registerTool("add_tutorial_idea", {
+    title: "Add a tutorial idea",
+    description: "Adds a tutorial idea to the bottom of his Up next list. Use when he mentions a tutorial he might make.",
+    inputSchema: { title: z.string().min(2).max(160), notes: z.string().max(4000).optional().describe("Angle, why it matters, anything he said about it") },
+  }, async ({ title, notes }) => {
+    const r = app.work.addIdea(title, notes);
+    return text(!r ? "Not added: it needs a title." : r.created ? `Added to the tutorial list: ${r.row.title}` : `Already on the list: ${r.row.title}`);
+  });
+
+  server.registerTool("save_tutorial_outline", {
+    title: "Save a tutorial outline",
+    description: "Saves the outline you and Ben worked out for a tutorial, replacing any earlier outline, and moves the tutorial to the Outline stage. Pass the full outline in his format: skim-friendly bullets with a bold label and a brief phrase, no dense paragraphs. Use the title from the `tutorials` list when it exists.",
+    inputSchema: { tutorial: z.string().min(2).max(160).describe("The tutorial's title"), outline: z.string().min(20).max(60000), create_if_missing: z.boolean().optional().describe("Create the tutorial if no open one matches (default true)") },
+  }, async ({ tutorial, outline, create_if_missing }) => {
+    const saved = app.work.saveOutline(tutorial, outline, create_if_missing !== false);
+    return text(saved ? `Outline saved on "${saved}". It's in Life Architect under Work.` : `Not saved: no open tutorial matches "${tutorial}". Check the name with the tutorials list.`);
   });
 
   server.registerTool("handoff_summary", {
