@@ -172,3 +172,24 @@ describe("YouTube prep", () => {
     expect((await json("GET", `/api/work/tutorials/${id}/prep`)).prep.thumbnail).toEqual({ set: true, source: "Ben's" });
   });
 });
+
+describe("getting a prep Hermes already did", () => {
+  it("pulls the current state without running anything, and says so when there's none", async () => {
+    const { json } = make();
+    const id = await readyTutorial(json);
+    let reply = block({ status: "failed", note: "No prep doc or upload found for this one." });
+    const seen = hermes(() => reply);
+    await json("POST", `/api/work/tutorials/${id}/prep`, { action: "fetch" });
+    await settle();
+    expect(seen[0]).toMatch(/^What's the current state of the YouTube prep for "Sparrow Wallet Omnibus"\? Don't start or redo anything/);
+    let v = await json("GET", `/api/work/tutorials/${id}/prep`);
+    expect([v.pending, v.error]).toEqual([null, "No prep doc or upload found for this one."]);
+
+    reply = block(FULL);
+    await json("POST", `/api/work/tutorials/${id}/prep`, { action: "fetch" });
+    await settle();
+    v = await json("GET", `/api/work/tutorials/${id}/prep`);
+    expect([v.pending, v.error, v.started, v.prep.cards.length]).toEqual([null, null, true, 1]);
+    expect((await json("GET", `/api/work/tutorials/${id}`)).log[0].text).toBe("Got the latest from Hermes: Applied title 1, description, 13 tags, private.");
+  });
+});

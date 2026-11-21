@@ -11,12 +11,12 @@ import type { Ctx } from "./app.ts";
 import { chat } from "./file.ts";
 import { saveFile, serve, deleteFile, type StoredFile } from "./files.ts";
 
-export type PrepAction = "prep" | "title" | "thumbnail" | "social" | "schedule" | "other";
-const ACTIONS: PrepAction[] = ["prep", "title", "thumbnail", "social", "schedule", "other"];
-const LABEL: Record<PrepAction, string> = { prep: "YouTube prep", title: "title change", thumbnail: "thumbnail", social: "post edit", schedule: "scheduling", other: "request" };
+export type PrepAction = "prep" | "fetch" | "title" | "thumbnail" | "social" | "schedule" | "other";
+const ACTIONS: PrepAction[] = ["prep", "fetch", "title", "thumbnail", "social", "schedule", "other"];
+const LABEL: Record<PrepAction, string> = { prep: "YouTube prep", fetch: "status check", title: "title change", thumbnail: "thumbnail", social: "post edit", schedule: "scheduling", other: "request" };
 const PREP = /<<<PREP\s*([\s\S]*?)\s*PREP>>>/;
 /** Minutes before the first status check, then between checks, and before giving up. */
-const FIRST_CHECK: Record<PrepAction, number> = { prep: 12, schedule: 6, title: 4, thumbnail: 4, social: 4, other: 5 };
+const FIRST_CHECK: Record<PrepAction, number> = { prep: 12, fetch: 3, schedule: 6, title: 4, thumbnail: 4, social: 4, other: 5 };
 const EVERY = 5;
 const GIVE_UP = 4 * 60;
 
@@ -136,7 +136,7 @@ export function mountPrep(app: Hono, ctx: Ctx, h: Helpers) {
       return;
     }
     db.prepare("UPDATE tutorial_prep SET pending = NULL, pending_since = NULL, error = NULL WHERE tutorial_id = ?").run(tid);
-    const done = pending === "prep" ? "YouTube prep is ready" : pending === "schedule" ? `Scheduled${merged.publish_at ? ` for ${merged.publish_at}` : ""}` : `Hermes finished the ${LABEL[pending]}`;
+    const done = pending === "prep" ? "YouTube prep is ready" : pending === "fetch" ? "Got the latest from Hermes" : pending === "schedule" ? `Scheduled${merged.publish_at ? ` for ${merged.publish_at}` : ""}` : `Hermes finished the ${LABEL[pending]}`;
     h.log(tid, `${done}${got.note ? `: ${got.note}` : ""}`);
     // Something to come back to: a task in Work, so it shows in "Today, in order".
     if (pending === "prep") {
@@ -180,6 +180,9 @@ export function mountPrep(app: Hono, ctx: Ctx, h: Helpers) {
       const thumb = thumbUrl(r);
       content = `YouTube prep for "${t.title}".${t.video_id ? ` The video ID is ${t.video_id}.` : " Find the upload on the channel yourself, as you usually do."}${thumb ? ` I've added a thumbnail: download it from ${thumb} and use it as you usually would.` : ""}${p.publish_at ? ` Release time: ${p.publish_at}.` : " There's no release time yet, so draft the socials but don't schedule anything."}${say ? ` ${say}` : ""} ${finishWith(t, "prep")}`;
       note = "Asked Hermes for the YouTube prep";
+    } else if (action === "fetch") {
+      content = `What's the current state of the YouTube prep for ${about(t, p)}? Don't start or redo anything: read the live video, your prep doc, Buffer and the Nostr queue, and send back everything the prep has (titles, description, tags, cards, sponsor reads, socials, Studio to-dos), as it stands now. If a prep run is still going, set "status" to "working". If there's no prep for it at all yet, set "status" to "failed" and say so in "note". ${finishWith(t, "fetch")}`;
+      note = "Asked Hermes for the latest on the YouTube prep";
     } else if (action === "title") {
       const exact = (b.title ?? "").trim().slice(0, 100);
       if (!exact && !say) return "Say what you want from the title.";

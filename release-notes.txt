@@ -1,1 +1,1 @@
-YouTube prep gets its own screen: see the titles, thumbnail, socials (X, Facebook, Nostr, Community), cards with timestamps and links, description, tags and Studio to-dos. Change the title, upload a thumbnail, suggest edits to any post, and set a release time later to schedule the video and socials. The app now checks in on Hermes every few minutes and leaves a task when the prep is ready. Fixes long Hermes jobs being cut off after 5 minutes.
+YouTube prep: "Get it from Hermes" pulls in a prep Hermes already did (or refreshes the current one) without running anything again.

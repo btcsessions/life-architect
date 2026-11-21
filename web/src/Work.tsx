@@ -227,7 +227,10 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
           <span className="work-title">YouTube prep</span>
           <span className={pr.error ? "accent" : "muted"}>{pr.pending ? <span className="electro">Hermes is on the {pr.pending}…</span> : pr.error ? pr.error : pr.started ? `${pr.title ? `"${pr.title}"` : "Prep is in"} · ${pr.posts} posts · ${pr.cards} cards · ${pr.publish_at ? `releases ${release(pr.publish_at)}` : "no release time yet"}` : "Hermes finds the upload, then writes the titles, description, tags, cards and socials. Takes 10 to 20 minutes; you can leave."}</span>
           <div className="row">
-            {pr.started ? <button className="btn primary" onClick={() => go({ at: "prep", id })}>Open YouTube prep</button> : <button className="btn primary" disabled={!t.has_model} onClick={() => act(async () => { await call(`/api/work/tutorials/${id}/run`, json("POST", { skill: "youtube_prep" })); go({ at: "prep", id }); })}>Run YouTube prep</button>}
+            {pr.started ? <button className="btn primary" onClick={() => go({ at: "prep", id })}>Open YouTube prep</button> : <>
+              <button className="btn primary" disabled={!t.has_model} onClick={() => act(async () => { await call(`/api/work/tutorials/${id}/run`, json("POST", { skill: "youtube_prep" })); go({ at: "prep", id }); })}>Run YouTube prep</button>
+              <button className="btn" disabled={!t.has_model} onClick={() => act(async () => { await call(`/api/work/tutorials/${id}/prep`, json("POST", { action: "fetch" })); go({ at: "prep", id }); })}>Already prepped? Get it</button>
+            </>}
             {pr.publish_at ? null : <button className="btn" onClick={() => patch({ stage: "live" })}>It's live</button>}
           </div>
         </>
@@ -421,6 +424,7 @@ function PrepScreen({ go, onError, stt, id }: In & { id: number }) {
         <span className="muted">Hermes finds the upload, then writes the titles, description, tags, cards and socials. It takes 10 to 20 minutes, and this page checks in on it.</span>
         <label className="btn as-link upload wide">{v.thumbnail ? `Thumbnail: ${v.thumbnail.name} · change` : "Add your thumbnail (optional)"}<input className="sr" type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ""; }} /></label>
         <button className="btn primary" disabled={!v.has_model} onClick={() => ask({ action: "prep" })}>Run YouTube prep</button>
+        <button className="btn" disabled={!v.has_model} onClick={() => ask({ action: "fetch" })}>Already prepped? Get it from Hermes</button>
       </section>
     </div>
   );
@@ -436,12 +440,13 @@ function PrepScreen({ go, onError, stt, id }: In & { id: number }) {
             <div className="row"><button className="btn" onClick={() => ask({ action: "check" })}>Check now</button></div>
           </>
         ) : v.error ? (
-          <><span className="eyebrow accent">Needs a look</span><span>{v.error}</span><div className="row"><button className="btn" onClick={() => ask({ action: "prep" })}>Run the prep again</button></div></>
+          <><span className="eyebrow accent">Needs a look</span><span>{v.error}</span><div className="row"><button className="btn" onClick={() => ask({ action: "fetch" })}>Get it from Hermes</button><button className="btn" onClick={() => ask({ action: "prep" })}>Run YouTube prep</button></div></>
         ) : (
           <>
             <span className="eyebrow">{p.publish_at ? "Scheduled" : "Ready"}</span>
             <span>{p.publish_at ? `Releases ${release(p.publish_at)}` : "No release time yet"}{p.privacy ? ` · ${p.privacy}` : ""}{p.video_id ? <> · <a href={`https://studio.youtube.com/video/${p.video_id}/edit`} target="_blank" rel="noreferrer">Open in Studio</a></> : null}</span>
             {p.note && <span className="muted small">{p.note}</span>}
+            <div className="row"><button className="btn ghost" onClick={() => ask({ action: "fetch" })}>Refresh from Hermes</button></div>
           </>
         )}
         {v.reply && !busy && <div className="hermes-says"><span className="eyebrow electro">Hermes</span>{v.reply}</div>}
