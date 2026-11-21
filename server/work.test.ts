@@ -82,24 +82,18 @@ describe("tutorial list", () => {
 });
 
 describe("Hermes skills from the Work area", () => {
-  it("runs YouTube prep with the video ID and carries the conversation into a follow-up", async () => {
+  it("hands YouTube prep to the prep engine, with the video ID when it's known", async () => {
     const { json, call } = make();
     const { tutorial } = await json("POST", "/api/work/tutorials", { title: "Radar Chat" });
     expect((await call("POST", `/api/work/tutorials/${tutorial.id}/run`, { skill: "youtube_prep" })).status).toBe(400); // no model yet
     await json("PUT", "/api/settings", { llm_url: "http://hermes.test/v1", llm_model: "hermes-agent" });
-    const seen = hermes((last) => (last.startsWith("YouTube prep") ? "Prep written. Three titles scored.\n<<<FOUND\nvideo: abc123XYZ\nFOUND>>>" : "Swapped to title two."));
+    const seen = hermes(() => 'Done.\n<<<PREP\n{"status": "done", "title": "Radar Chat in 10 minutes"}\nPREP>>>');
     await json("PATCH", `/api/work/tutorials/${tutorial.id}`, { video_id: "abc123XYZ" });
     await json("POST", `/api/work/tutorials/${tutorial.id}/run`, { skill: "youtube_prep" });
     await settle();
-    let t = await json("GET", `/api/work/tutorials/${tutorial.id}`);
-    expect(t.stage).toBe("youtube_prep");
-    expect(t.jobs.youtube_prep).toMatchObject({ status: "done", reply: "Prep written. Three titles scored." });
-    expect(seen[0][0].content).toMatch(/^YouTube prep for "Radar Chat"\. The private upload's video ID is abc123XYZ\. End your reply/);
-    await json("POST", `/api/work/tutorials/${tutorial.id}/run`, { skill: "youtube_prep", say: "use the second title" });
-    await settle();
-    expect(seen[1].map((m: any) => m.role)).toEqual(["user", "assistant", "user"]); // the whole exchange is resent
-    t = await json("GET", `/api/work/tutorials/${tutorial.id}`);
-    expect(t.jobs.youtube_prep.reply).toBe("Swapped to title two.");
+    expect((await json("GET", `/api/work/tutorials/${tutorial.id}`)).stage).toBe("youtube_prep");
+    expect(seen[0][0].content).toMatch(/^YouTube prep for "Radar Chat"\. The video ID is abc123XYZ\./);
+    expect((await json("GET", `/api/work/tutorials/${tutorial.id}/prep`)).prep.title).toBe("Radar Chat in 10 minutes");
   });
 
   it("starts a line edit by the footage folder name and leaves the back-and-forth to Telegram", async () => {
@@ -225,7 +219,7 @@ describe("finding things without being told", () => {
   it("YouTube prep and line edit leave the finding to Hermes when nothing is set", async () => {
     const { json } = make();
     await json("PUT", "/api/settings", { llm_url: "http://hermes.test/v1", llm_model: "hermes-agent" });
-    const seen = hermes((last) => (last.startsWith("YouTube") ? "Done.\n<<<FOUND\nvideo: AbC_123-xyz\nFOUND>>>" : "Started, using 2026-11 Radar."));
+    const seen = hermes(() => "Started, using 2026-11 Radar.");
     const { tutorial } = await json("POST", "/api/work/tutorials", { title: "Radar Chat" });
     await json("POST", `/api/work/tutorials/${tutorial.id}/run`, { skill: "line_edit" });
     await settle();
@@ -233,7 +227,6 @@ describe("finding things without being told", () => {
     await json("POST", `/api/work/tutorials/${tutorial.id}/run`, { skill: "youtube_prep" });
     await settle();
     expect(seen[1][0].content).toContain("Find the upload on the channel yourself");
-    expect((await json("GET", `/api/work/tutorials/${tutorial.id}`)).video_id).toBe("AbC_123-xyz");
   });
 
   it("checks on a tutorial from the main screen or Claude, adding it if it's new", async () => {

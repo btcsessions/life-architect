@@ -3,11 +3,20 @@ import { call, json } from "./api";
 import { MicButton, ScreenHead, useDictation } from "./ui";
 
 type Props = { onBack: () => void; onError: (m: string) => void; stt?: boolean };
-type Screen = { at: "home" } | { at: "tutorial"; id: number } | { at: "bitcast"; id?: number } | { at: "filed" };
+type Screen = { at: "home" } | { at: "tutorial"; id: number } | { at: "prep"; id: number } | { at: "bitcast"; id?: number } | { at: "filed" };
 interface Brief { id: number; title: string; stage: string; stage_number: number; source: string; has_outline: boolean; has_notes: boolean; links: number; running: string | null; filed_at: string | null }
 interface Home { stages: Array<{ id: string; name: string }>; in_motion: Brief[]; up_next: Brief[]; bitcast: { day: string; has_file: boolean; takes: number; running: boolean } | null; filed: number; has_model: boolean }
 interface Job { status: "working" | "done" | "failed"; reply: string | null; created_at: string }
-interface Full extends Brief { notes: string | null; outline: string | null; outline_from: string | null; outline_url: string | null; video_id: string | null; folder: string | null; next_stage: { id: string; name: string } | null; stages: Array<{ id: string; name: string; state: string }>; link_list: Array<{ id: number; label: string; url: string }>; log: Array<{ ts: string; text: string }>; jobs: { line_edit: Job | null; youtube_prep: Job | null; check: Job | null }; has_model: boolean }
+interface Full extends Brief { notes: string | null; outline: string | null; outline_from: string | null; outline_url: string | null; video_id: string | null; folder: string | null; next_stage: { id: string; name: string } | null; stages: Array<{ id: string; name: string; state: string }>; link_list: Array<{ id: number; label: string; url: string }>; log: Array<{ ts: string; text: string }>; jobs: { line_edit: Job | null; youtube_prep: Job | null; check: Job | null }; prep: PrepBrief; has_model: boolean }
+interface PrepBrief { started: boolean; pending: string | null; error: string | null; title: string | null; publish_at: string | null; posts: number; cards: number }
+interface Social { id: string; platform: string; label: string; text: string; state?: string }
+interface PrepData {
+  note?: string; video_id?: string; title?: string; title_candidates?: Array<{ title: string; score?: number | string }>; description?: string; tags?: string; priority_tags?: string[]; chapters?: string;
+  cards?: Array<{ time: string; teaser?: string; what?: string; link?: string }>; sponsor_reads?: Array<{ start?: string; end?: string; sponsor?: string; link?: string }>;
+  pinned_comment?: string; end_screen?: string; thumbnail?: { set?: boolean; source?: string; note?: string }; socials?: Social[]; privacy?: string; publish_at?: string | null;
+  playlists?: string[]; flags?: string[]; studio_todos?: string[]; prep_doc_path?: string;
+}
+interface PrepView { prep: PrepData; started: boolean; pending: string | null; pending_label: string | null; pending_since: string | null; last_check: string | null; checks: number; error: string | null; reply: string | null; thumbnail: { name: string; url: string } | null; has_model: boolean }
 interface Episode { id: number; day: string; file: { name: string; size: number } | null; takes: Array<{ text: string; ts: string; asked: string | null }>; report: string | null; job: { status: string; reply: string | null } | null; has_model: boolean }
 
 const when = (iso: string) => new Date(iso).toLocaleDateString("en", { month: "short", day: "numeric" });
@@ -17,6 +26,7 @@ export function Work({ onBack, onError, stt }: Props) {
   const [screen, setScreen] = useState<Screen>({ at: "home" });
   const p = { go: setScreen, onError, stt: Boolean(stt) };
   if (screen.at === "tutorial") return <Tutorial {...p} id={screen.id} />;
+  if (screen.at === "prep") return <PrepScreen {...p} id={screen.id} />;
   if (screen.at === "bitcast") return <Bitcast {...p} id={screen.id} />;
   if (screen.at === "filed") return <Filed {...p} />;
   return <HomeScreen {...p} onBack={onBack} />;
@@ -29,6 +39,19 @@ const Bars = ({ n, total = 6 }: { n: number; total?: number }) => (
 const Sub = ({ title, eyebrow, go, right }: { title: ReactNode; eyebrow?: string; go: (s: Screen) => void; right?: ReactNode }) => (
   <div className="screen-head"><button className="btn ghost back" onClick={() => go({ at: "home" })}>‹ Work</button><div className="screen-title">{eyebrow && <span className="eyebrow">{eyebrow}</span>}{typeof title === "string" ? <h1>{title}</h1> : title}</div><div className="screen-right">{right}</div></div>
 );
+const ago = (iso: string | null) => { if (!iso) return ""; const m = Math.round((Date.now() - Date.parse(iso)) / 60_000); return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
+const release = (iso: string) => new Date(iso).toLocaleString("en", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+/** Copy that also works over plain http on the Umbrel, where the clipboard API isn't available. */
+function copyText(text: string) {
+  if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).catch(() => {}); return; }
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+}
+function Copy({ text, label = "Copy" }: { text: string; label?: string }) {
+  const [done, setDone] = useState(false);
+  return <button className="btn ghost" onClick={() => { copyText(text); setDone(true); setTimeout(() => setDone(false), 1500); }}>{done ? "Copied" : label}</button>;
+}
 const docName = (url: string) => (/docs\.google\.com\/document/.test(url) ? "Google Doc" : /drive\.google\.com/.test(url) ? "Drive file" : new URL(url).hostname);
 
 /* ---------- Work home ---------- */
@@ -196,7 +219,20 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
     if (t.stage === "idea") return <><span className="work-title">Outline it</span><span className="muted">Talk it through with Claude and say "save the outline to Life Architect", or link the Google Doc below.</span></>;
     if (t.stage === "outline") return <><span className="work-title">Finish the outline</span><span className="muted">When the outline is ready to shoot from, move it on.</span><div className="row"><button className="btn primary" onClick={() => patch({ stage: "record" })}>Outline is ready</button></div></>;
     if (t.stage === "record") return <><span className="work-title">Record</span><span className="muted">Mark it once the footage is on the Mac.</span><div className="row"><button className="btn primary" onClick={() => patch({ stage: "line_edit" })}>It's recorded</button></div></>;
-    if (t.stage === "live") return <><span className="work-title">It's live</span><div className="row"><button className="btn primary" onClick={() => act(async () => { await call(`/api/work/tutorials/${id}`, json("PATCH", { filed: true })); go({ at: "home" }); })}>File it away</button></div></>;
+    if (t.stage === "live") return <><span className="work-title">It's live</span><div className="row">{t.prep.started && <button className="btn" onClick={() => go({ at: "prep", id })}>YouTube prep</button>}<button className="btn primary" onClick={() => act(async () => { await call(`/api/work/tutorials/${id}`, json("PATCH", { filed: true })); go({ at: "home" }); })}>File it away</button></div></>;
+    if (t.stage === "youtube_prep") {
+      const pr = t.prep;
+      return (
+        <>
+          <span className="work-title">YouTube prep</span>
+          <span className={pr.error ? "accent" : "muted"}>{pr.pending ? <span className="electro">Hermes is on the {pr.pending}…</span> : pr.error ? pr.error : pr.started ? `${pr.title ? `"${pr.title}"` : "Prep is in"} · ${pr.posts} posts · ${pr.cards} cards · ${pr.publish_at ? `releases ${release(pr.publish_at)}` : "no release time yet"}` : "Hermes finds the upload, then writes the titles, description, tags, cards and socials. Takes 10 to 20 minutes; you can leave."}</span>
+          <div className="row">
+            {pr.started ? <button className="btn primary" onClick={() => go({ at: "prep", id })}>Open YouTube prep</button> : <button className="btn primary" disabled={!t.has_model} onClick={() => act(async () => { await call(`/api/work/tutorials/${id}/run`, json("POST", { skill: "youtube_prep" })); go({ at: "prep", id }); })}>Run YouTube prep</button>}
+            {pr.publish_at ? null : <button className="btn" onClick={() => patch({ stage: "live" })}>It's live</button>}
+          </div>
+        </>
+      );
+    }
     const isEdit = t.stage === "line_edit";
     return (
       <>
@@ -341,6 +377,189 @@ function Tutorial({ go, onError, stt, id }: In & { id: number }) {
       </section>
 
       {!t.filed_at && <div className="row"><button className="btn grow" onClick={() => go({ at: "home" })}>Back to the list</button><button className="btn grow" onClick={() => act(async () => { await call(`/api/work/tutorials/${id}`, json("PATCH", { filed: true })); go({ at: "home" }); })}>File it away</button></div>}
+    </div>
+  );
+}
+
+/* ---------- YouTube prep ---------- */
+function PrepScreen({ go, onError, stt, id }: In & { id: number }) {
+  const [v, setV] = useState<PrepView | null>(null);
+  const [title, setTitle] = useState<string | null>(null);
+  const [edit, setEdit] = useState<{ id: string; say: string } | null>(null);
+  const [when, setWhen] = useState("");
+  const [other, setOther] = useState("");
+  const [name, setName] = useState("");
+  const [again, setAgain] = useState(false);
+  const load = useCallback(() => call<PrepView>(`/api/work/tutorials/${id}/prep`).then(setV).catch((e) => onError(e.message)), [id, onError]);
+  useEffect(() => { load(); call<Full>(`/api/work/tutorials/${id}`).then((t) => setName(t.title)).catch(() => {}); }, [load, id]);
+  useEffect(() => { if (!v?.pending) return; const i = setInterval(load, 8000); return () => clearInterval(i); }, [v?.pending, load]);
+  const dt = useDictation(stt, (said) => setTitle((x) => (x ? `${x} ${said}` : said)), onError);
+  const ds = useDictation(stt, (said) => setEdit((x) => (x ? { ...x, say: x.say ? `${x.say} ${said}` : said } : x)), onError);
+  const dx = useDictation(stt, (said) => setOther((x) => (x ? `${x} ${said}` : said)), onError);
+  if (!v) return <p className="muted">Loading…</p>;
+  const p = v.prep, busy = Boolean(v.pending);
+  const ask = async (body: Record<string, unknown>) => { try { setV(await call<PrepView>(`/api/work/tutorials/${id}/prep`, json("POST", body))); return true; } catch (e) { onError((e as Error).message); return false; } };
+  const upload = async (file: File | undefined) => {
+    if (!file) return;
+    const f = new FormData(); f.set("file", file);
+    try { setV(await call<PrepView>(`/api/work/tutorials/${id}/prep/thumbnail`, { method: "POST", body: f })); } catch (e) { onError((e as Error).message); }
+  };
+  const cardsText = (p.cards ?? []).map((c) => `${c.time}  ${c.teaser ?? c.what ?? ""}  ${c.link ?? ""}`.trim()).join("\n");
+  const head = (
+    <div className="screen-head">
+      <button className="btn ghost back" onClick={() => go({ at: "tutorial", id })}>‹ Tutorial</button>
+      <div className="screen-title"><span className="eyebrow">{name || "Sovereign Sessions"}</span><h1>YouTube prep</h1></div>
+      <div className="screen-right" />
+    </div>
+  );
+
+  if (!v.started) return (
+    <div className="stack work">
+      {head}
+      <section className="card pad hot stack">
+        <span className="eyebrow accent">Not run yet</span>
+        <span className="muted">Hermes finds the upload, then writes the titles, description, tags, cards and socials. It takes 10 to 20 minutes, and this page checks in on it.</span>
+        <label className="btn as-link upload wide">{v.thumbnail ? `Thumbnail: ${v.thumbnail.name} · change` : "Add your thumbnail (optional)"}<input className="sr" type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ""; }} /></label>
+        <button className="btn primary" disabled={!v.has_model} onClick={() => ask({ action: "prep" })}>Run YouTube prep</button>
+      </section>
+    </div>
+  );
+
+  return (
+    <div className="stack work">
+      {head}
+      <section className={`card pad stack ${busy || v.error ? "hot" : ""}`} role="status">
+        {busy ? (
+          <>
+            <span className="eyebrow electro">Hermes is on the {v.pending_label}</span>
+            <span className="muted small">Asked {ago(v.pending_since)}{v.checks ? ` · checked ${v.checks} time${v.checks === 1 ? "" : "s"}, last ${ago(v.last_check)}` : " · first check in a few minutes"}. This updates by itself, and you'll get a task in Today when the prep is ready.</span>
+            <div className="row"><button className="btn" onClick={() => ask({ action: "check" })}>Check now</button></div>
+          </>
+        ) : v.error ? (
+          <><span className="eyebrow accent">Needs a look</span><span>{v.error}</span><div className="row"><button className="btn" onClick={() => ask({ action: "prep" })}>Run the prep again</button></div></>
+        ) : (
+          <>
+            <span className="eyebrow">{p.publish_at ? "Scheduled" : "Ready"}</span>
+            <span>{p.publish_at ? `Releases ${release(p.publish_at)}` : "No release time yet"}{p.privacy ? ` · ${p.privacy}` : ""}{p.video_id ? <> · <a href={`https://studio.youtube.com/video/${p.video_id}/edit`} target="_blank" rel="noreferrer">Open in Studio</a></> : null}</span>
+            {p.note && <span className="muted small">{p.note}</span>}
+          </>
+        )}
+        {v.reply && !busy && <div className="hermes-says"><span className="eyebrow electro">Hermes</span>{v.reply}</div>}
+      </section>
+
+      <details className="card pad prep-sec" open={!busy && !v.error && !p.publish_at}>
+        <summary><span className="eyebrow">Release</span><span className="grow">{p.publish_at ? release(p.publish_at) : "Not set"}</span></summary>
+        <form className="form" onSubmit={async (e) => { e.preventDefault(); if (await ask({ action: "schedule", release_at: when })) setWhen(""); }}>
+          <label htmlFor="rel" className="sr">Release time</label>
+          <input id="rel" className="plain-input" type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
+          <span className="muted small">Hermes sets YouTube's publish time and schedules the X thread, Facebook post and Nostr note for the same moment. It confirms with you on Telegram first, and you sign the Nostr note in Amber.</span>
+          <div className="row"><button className="btn primary" type="submit" disabled={!when || busy}>{p.publish_at ? "Move the release" : "Schedule the release"}</button></div>
+        </form>
+      </details>
+
+      <details className="card pad prep-sec">
+        <summary><span className="eyebrow">Title</span><span className="grow clip">{p.title ?? "—"}</span></summary>
+        <div className="stack">
+          {(p.title_candidates ?? []).map((c, i) => (
+            <div key={i} className="row cand"><span className="grow">{c.title}{c.score !== undefined && <span className="muted small"> · {c.score}</span>}</span>{c.title === p.title ? <span className="muted small">Live</span> : <button className="btn ghost" disabled={busy} onClick={() => ask({ action: "title", title: c.title })}>Use</button>}</div>
+          ))}
+          <label htmlFor="tl" className="eyebrow">Your own title, or what you want from it</label>
+          <div className="row" style={{ alignItems: "flex-start" }}>
+            <textarea id="tl" className="plain grow" placeholder={dt.recording ? `Listening… ${dt.clock}` : "e.g. Sparrow Wallet: The Complete Guide, or: punchier, mention fees"} value={title ?? ""} onChange={(e) => setTitle(e.target.value)} />
+            <MicButton d={dt} small />
+          </div>
+          <div className="row">
+            <button className="btn" disabled={!title?.trim() || busy} onClick={async () => { if (await ask({ action: "title", title })) setTitle(null); }}>Use exactly this</button>
+            <button className="btn" disabled={!title?.trim() || busy} onClick={async () => { if (await ask({ action: "title", say: title })) setTitle(null); }}>Ask for new options</button>
+          </div>
+        </div>
+      </details>
+
+      <details className="card pad prep-sec">
+        <summary><span className="eyebrow">Thumbnail</span><span className="grow">{p.thumbnail?.set ? `Set${p.thumbnail.source ? ` · ${p.thumbnail.source}` : ""}` : v.thumbnail ? "Added, not set yet" : "None yet"}</span></summary>
+        <div className="stack">
+          {v.thumbnail && <img className="thumb" src={v.thumbnail.url} alt="Your thumbnail" />}
+          {p.thumbnail?.note && <span className="muted small">{p.thumbnail.note}</span>}
+          <label className={`btn as-link upload wide ${busy ? "disabled" : ""}`}>{v.thumbnail ? "Replace the thumbnail" : "Upload the thumbnail"}<input className="sr" type="file" disabled={busy} accept="image/png,image/jpeg,image/webp" onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ""; }} /></label>
+          <span className="muted small">Hermes sets it on the video. If Daniel's designed one is already live, his stays and yours becomes the Test & Compare alternate.</span>
+        </div>
+      </details>
+
+      <details className="card pad prep-sec">
+        <summary><span className="eyebrow">Socials</span><span className="grow">{p.socials?.length ? `${p.socials.length} posts` : "None yet"}</span></summary>
+        <div className="stack">
+          {(p.socials ?? []).map((s) => (
+            <div key={s.id} className="post">
+              <div className="row"><strong className="grow">{s.label.toLowerCase().includes(s.platform.toLowerCase()) ? s.label : `${s.platform} · ${s.label}`}</strong>{s.state && <span className="chip">{s.state.replace(/_/g, " ")}</span>}</div>
+              <p className="pre">{s.text}</p>
+              {edit?.id === s.id ? (
+                <div className="form">
+                  <div className="row" style={{ alignItems: "flex-start" }}>
+                    <label htmlFor={`ed${s.id}`} className="sr">What to change</label>
+                    <textarea id={`ed${s.id}`} className="plain grow" autoFocus placeholder={ds.recording ? `Listening… ${ds.clock}` : "What to change, or the exact wording to use"} value={edit.say} onChange={(e) => setEdit({ ...edit, say: e.target.value })} />
+                    <MicButton d={ds} small />
+                  </div>
+                  <div className="row"><button className="btn" disabled={!edit.say.trim() || busy} onClick={async () => { if (await ask({ action: "social", social: s.id, say: edit.say })) setEdit(null); }}>Send to Hermes</button><button className="btn ghost" onClick={() => setEdit(null)}>Cancel</button></div>
+                </div>
+              ) : <div className="row"><Copy text={s.text} /><button className="btn ghost" disabled={busy} onClick={() => setEdit({ id: s.id, say: "" })}>Suggest an edit</button></div>}
+            </div>
+          ))}
+          {p.socials?.some((s) => s.platform === "Nostr") && <span className="muted small">A Nostr note can't be edited once signed: Hermes cancels it and you sign the new text in Amber.</span>}
+        </div>
+      </details>
+
+      <details className="card pad prep-sec">
+        <summary><span className="eyebrow">Cards</span><span className="grow">{p.cards?.length ? `${p.cards.length} cards` : "None yet"}</span></summary>
+        <div className="stack">
+          <ul className="list cards-list">
+            {(p.cards ?? []).map((c, i) => (
+              <li key={i}><span className="when">{c.time}</span><span className="grow">{c.teaser && <strong className="block">{c.teaser}</strong>}{c.what && <span className="muted small block">{c.what}</span>}{c.link && <a className="small" href={c.link} target="_blank" rel="noreferrer">{c.link}</a>}</span></li>
+            ))}
+          </ul>
+          {cardsText && <div className="row"><Copy text={cardsText} label="Copy all" /></div>}
+        </div>
+      </details>
+
+      <details className="card pad prep-sec">
+        <summary><span className="eyebrow">Description & tags</span><span className="grow">{p.description ? `${p.description.split(/\s+/).length} words` : "None yet"}</span></summary>
+        <div className="stack">
+          {p.description && <><p className="pre">{p.description}</p><div className="row"><Copy text={p.description} label="Copy description" /></div></>}
+          {p.tags && <><span className="eyebrow">Tags</span><p className="small">{p.tags}</p>{p.priority_tags?.length ? <span className="muted small">Top: {p.priority_tags.join(", ")}</span> : null}<div className="row"><Copy text={p.tags} label="Copy tags" /></div></>}
+          {p.chapters && <><span className="eyebrow">Chapters</span><p className="pre small">{p.chapters}</p></>}
+          {p.playlists?.length ? <span className="muted small">Playlists: {p.playlists.join(", ")}</span> : null}
+        </div>
+      </details>
+
+      {(p.sponsor_reads?.length || p.pinned_comment || p.end_screen) ? (
+        <details className="card pad prep-sec">
+          <summary><span className="eyebrow">Sponsors, pinned comment, end screen</span></summary>
+          <div className="stack">
+            {(p.sponsor_reads ?? []).map((r, i) => <div key={i} className="row"><span className="when">{r.start}{r.end ? `–${r.end}` : ""}</span><span className="grow">{r.sponsor}{r.link && <> · <a href={r.link} target="_blank" rel="noreferrer">link</a></>}</span></div>)}
+            {p.pinned_comment && <><span className="eyebrow">Pinned comment</span><p className="pre">{p.pinned_comment}</p><div className="row"><Copy text={p.pinned_comment} /></div></>}
+            {p.end_screen && <><span className="eyebrow">End screen</span><p className="small">{p.end_screen}</p></>}
+          </div>
+        </details>
+      ) : null}
+
+      {(p.studio_todos?.length || p.flags?.length) ? (
+        <details className="card pad prep-sec" open={Boolean(p.flags?.length)}>
+          <summary><span className="eyebrow">For you in Studio</span><span className="grow">{p.flags?.length ? <span className="accent">{p.flags.length} flag{p.flags.length === 1 ? "" : "s"}</span> : `${p.studio_todos?.length} to do`}</span></summary>
+          <ul className="list">
+            {(p.flags ?? []).map((f, i) => <li key={`f${i}`}><span className="accent grow small">⚑ {f}</span></li>)}
+            {(p.studio_todos ?? []).map((f, i) => <li key={`t${i}`}><span className="grow small">{f}</span></li>)}
+          </ul>
+        </details>
+      ) : null}
+
+      <section className="stack">
+        <label htmlFor="ox" className="eyebrow">Anything else for Hermes</label>
+        <div className="row" style={{ alignItems: "flex-start" }}>
+          <textarea id="ox" className="plain grow" placeholder={dx.recording ? `Listening… ${dx.clock}` : "e.g. Add the Bitkey link to the pinned comment"} value={other} onChange={(e) => setOther(e.target.value)} />
+          <MicButton d={dx} small />
+        </div>
+        <div className="row"><button className="btn" disabled={!other.trim() || busy} onClick={async () => { if (await ask({ action: "other", say: other })) setOther(""); }}>Send to Hermes</button>{!again && <button className="btn ghost" disabled={busy} onClick={() => setAgain(true)}>Run the whole prep again…</button>}</div>
+        {again && <div className="row"><span className="accent small grow">This rewrites the title, description, tags and socials.</span><button className="btn" onClick={async () => { setAgain(false); await ask({ action: "prep" }); }}>Run it again</button><button className="btn ghost" onClick={() => setAgain(false)}>Keep</button></div>}
+      </section>
     </div>
   );
 }

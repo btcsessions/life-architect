@@ -78,3 +78,15 @@ to find them as usual, and "Check where it stands" / "Find it in Drive" ask Herm
 YouTube) without starting any skill. Hermes ends those replies with a `<<<FOUND … FOUND>>>` block of `key: value` lines
 (`stage`, `outline`, `folder`, `video`, `link: label | url`, `note`), which the app reads and strips before showing the reply.
 Stages found this way only ever move a tutorial forward.
+
+**YouTube prep** (`server/prep.ts`). The app sends `YouTube prep for "<title>". …` and Hermes runs its usual skill (10–20 min).
+Hermes reports the result by `POST /api/relay/youtube-prep` with `{"tutorial": "<title>", "action": "prep" | "title" |
+"thumbnail" | "social" | "schedule" | "other", "status": "done" | "working" | "failed", …fields}` and ends its reply with the
+same JSON between `<<<PREP` and `PREP>>>`. Fields: `video_id, title, title_candidates[{title, score}], description, tags,
+priority_tags, chapters, cards[{time, teaser, what, link}], sponsor_reads[{start, end, sponsor, link}], pinned_comment,
+end_screen, thumbnail{set, source, note}, socials[{id, platform, label, text, state}], privacy, publish_at, playlists, flags,
+studio_todos, prep_doc_path, note`. While something is pending the app sends a status check every 5 minutes (after 12 min
+for a prep, 6 for scheduling, 4 for edits); a check settles it only when `status` is `done` or `failed`. Thumbnails are handed
+over as `GET /api/work/thumb/<random token>.jpg` on the app's internal address. Scheduling sends an ISO time with offset;
+Hermes confirms on Telegram and Ben signs the Nostr note in Amber. Once `publish_at` passes, the tutorial moves to Live.
+

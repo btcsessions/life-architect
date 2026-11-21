@@ -25,5 +25,8 @@ setInterval(() => { if (app.mailConnected()) app.syncMail().catch(() => {}); }, 
 // Refresh Bitcoin wallets every 30 minutes once any are added.
 setInterval(() => { if (app.hasWallets()) app.syncBtc().catch(() => {}); }, 30 * 60_000).unref();
 
+// Check on YouTube prep and scheduling Hermes is working on, and mark released videos live.
+setInterval(() => { try { app.work.tick(); } catch { /* next minute */ } }, 60_000).unref();
+
 // The connector for Claude and other assistants, on its own port (see docs/claude-connector.md).
 startMcp(app, Number(process.env.MCP_PORT ?? 4601));

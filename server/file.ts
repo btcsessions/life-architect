@@ -1,3 +1,5 @@
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 // Quick-add: turn what was said or typed into filed tasks.
 // Uses the configured model when there is one; otherwise (or on any failure) plain rules,
 // so capture never depends on a model being reachable.
@@ -186,14 +188,37 @@ export interface ModelConfig {
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
+/**
+ * POST without Node's built-in fetch. That fetch gives up on any answer that takes over 5 minutes to start
+ * (its headers timeout), whatever signal is passed, which cut off long Hermes skills like YouTube prep.
+ */
+function longPost(url: string, headers: Record<string, string>, body: string, timeoutMs: number): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = (u.protocol === "https:" ? httpsRequest : httpRequest)(u, { method: "POST", headers: { ...headers, "content-length": Buffer.byteLength(body).toString() } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => { clearTimeout(timer); resolve(new Response(Buffer.concat(chunks), { status: res.statusCode ?? 500 })); });
+      res.on("error", (e) => { clearTimeout(timer); reject(e); });
+    });
+    const timer = setTimeout(() => { req.destroy(Object.assign(new Error("timed out"), { name: "TimeoutError" })); }, timeoutMs);
+    req.on("error", (e) => { clearTimeout(timer); reject(e); });
+    req.end(body);
+  });
+}
+
+const nativeFetch = globalThis.fetch;
+
 /** One chat-completions call. Throws with a plain reason on any failure. */
 export async function chat(cfg: ModelConfig, messages: ChatMessage[], timeoutMs = 60_000, fetchFn: typeof fetch = fetch): Promise<string> {
   let res: Response;
+  const headers = { "content-type": "application/json", ...(cfg.key ? { authorization: `Bearer ${cfg.key}` } : {}) };
+  const body = JSON.stringify({ model: cfg.model, temperature: 0.2, messages });
   try {
-    res = await fetchFn(`${cfg.url}/chat/completions`, {
+    res = fetchFn === nativeFetch && timeoutMs > 240_000 ? await longPost(`${cfg.url}/chat/completions`, headers, body, timeoutMs) : await fetchFn(`${cfg.url}/chat/completions`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(cfg.key ? { authorization: `Bearer ${cfg.key}` } : {}) },
-      body: JSON.stringify({ model: cfg.model, temperature: 0.2, messages }),
+      headers,
+      body,
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
@@ -202,8 +227,8 @@ export async function chat(cfg: ModelConfig, messages: ChatMessage[], timeoutMs 
   }
   if (res.status === 401 || res.status === 403) throw new Error("the model refused the key");
   if (!res.ok) throw new Error(`the model answered with an error (${res.status})`);
-  const body: any = await res.json().catch(() => null);
-  const content = body?.choices?.[0]?.message?.content;
+  const answer: any = await res.json().catch(() => null);
+  const content = answer?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new Error("the model sent back an empty answer");
   return content.trim();
 }

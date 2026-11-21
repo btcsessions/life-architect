@@ -279,3 +279,18 @@ textarea.outline { min-height: 320px; width: 100%; line-height: 1.5; }
 .ideas li.editing { padding: 6px 6px 6px 10px; }
 .ideas li.editing .plain-input { min-width: 0; }
 details.hermes-says summary { cursor: pointer; }
+.prep-sec > summary { display: flex; align-items: baseline; gap: 12px; cursor: pointer; list-style: none; }
+.prep-sec > summary::-webkit-details-marker { display: none; }
+.prep-sec > summary::after { content: "▸"; color: var(--muted, #8a93a6); }
+.prep-sec[open] > summary::after { content: "▾"; }
+.prep-sec[open] > summary { margin-bottom: 12px; }
+.prep-sec .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.prep-sec .pre { white-space: pre-wrap; margin: 0; }
+.prep-sec .post { border-top: 1px solid rgba(255,255,255,.08); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.prep-sec .post:first-child { border-top: 0; padding-top: 0; }
+.prep-sec .cand { border-bottom: 1px solid rgba(255,255,255,.06); padding-bottom: 6px; }
+.prep-sec .thumb { width: 100%; max-width: 480px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; }
+.prep-sec .cards-list li { align-items: flex-start; }
+.prep-sec .cards-list a { word-break: break-all; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,.2); }
+.btn.disabled { opacity: .5; pointer-events: none; }

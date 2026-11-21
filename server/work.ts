@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import type { Ctx } from "./app.ts";
 import { chat } from "./file.ts";
 import { saveFile, serve, deleteFile, type StoredFile } from "./files.ts";
+import { mountPrep } from "./prep.ts";
 
 export const STAGES = ["idea", "outline", "record", "line_edit", "youtube_prep", "live"] as const;
 export type Stage = (typeof STAGES)[number];
@@ -109,6 +110,8 @@ export function mountWork(app: Hono, ctx: Ctx) {
   }
   const working = (kind: string, ref: number) => Boolean(db.prepare("SELECT 1 FROM work_jobs WHERE kind = ? AND ref = ? AND status = 'working'").get(kind, ref));
 
+  const prep = mountPrep(app, ctx, { tut, log, find, selfUrl });
+
   /** Read the FOUND block of a reply and fill in what Hermes found. Stages only move forward. Returns what changed. */
   function applyFound(id: number, reply: string): string[] {
     const block = reply.match(FOUND)?.[1];
@@ -194,6 +197,7 @@ export function mountWork(app: Hono, ctx: Ctx) {
       link_list: db.prepare("SELECT * FROM tutorial_links WHERE tutorial_id = ? ORDER BY id").all(t.id),
       log: db.prepare("SELECT ts, text FROM tutorial_log WHERE tutorial_id = ? ORDER BY id DESC LIMIT 30").all(t.id),
       jobs: { line_edit: lastJob("line_edit", t.id) ?? null, youtube_prep: lastJob("youtube_prep", t.id) ?? null, check: lastJob("check", t.id) ?? null },
+      prep: (() => { const v = prep.view(t.id); return { started: v.started, pending: v.pending_label, error: v.error, title: v.prep.title ?? null, publish_at: v.prep.publish_at ?? null, posts: v.prep.socials?.length ?? 0, cards: v.prep.cards?.length ?? 0 }; })(),
       has_model: Boolean(ctx.modelFor("llm")),
     });
   });
@@ -234,6 +238,9 @@ export function mountWork(app: Hono, ctx: Ctx) {
     const id = Number(c.req.param("id"));
     for (const table of ["tutorial_links", "tutorial_log"]) db.prepare(`DELETE FROM ${table} WHERE tutorial_id = ?`).run(id);
     db.prepare("DELETE FROM work_jobs WHERE ref = ? AND kind != 'bitcast'").run(id);
+    const pr = db.prepare("SELECT thumb_file_id FROM tutorial_prep WHERE tutorial_id = ?").get(id) as any;
+    if (pr?.thumb_file_id) deleteFile(ctx, pr.thumb_file_id);
+    db.prepare("DELETE FROM tutorial_prep WHERE tutorial_id = ?").run(id);
     return c.json({ removed: db.prepare("DELETE FROM tutorials WHERE id = ?").run(id).changes });
   });
   // The new order of the ideas list, top to bottom.
@@ -271,6 +278,13 @@ export function mountWork(app: Hono, ctx: Ctx) {
     const kind = b.skill === "line_edit" || b.skill === "youtube_prep" ? (b.skill as "line_edit" | "youtube_prep") : null;
     if (!kind) return bad(c, "Pick line edit or YouTube prep.");
     if (!ctx.modelFor("llm")) return bad(c, "Set the deck model (Hermes) in Settings first.");
+    if (kind === "youtube_prep") {
+      // YouTube prep has its own screen and engine (prep.ts): Hermes reports back and the app checks in on it.
+      const problem = prep.start(t.id, "prep", { say: String(b.say ?? "") });
+      if (problem) return bad(c, problem, 409);
+      if (STAGES.indexOf(t.stage) < STAGES.indexOf("youtube_prep")) db.prepare("UPDATE tutorials SET stage = 'youtube_prep', updated_at = ? WHERE id = ?").run(now(), t.id);
+      return c.json({ started: true });
+    }
     if (working(kind, t.id)) return bad(c, "That's already running.", 409);
     const say = String(b.say ?? "").trim().slice(0, 4000);
     const prev = lastJob(kind, t.id);
@@ -399,6 +413,8 @@ export function mountWork(app: Hono, ctx: Ctx) {
 
   /** For the Claude connector. */
   return {
+    /** Every minute: check on YouTube prep Hermes is working on, and mark released videos live. */
+    tick: prep.tick,
     list: () => (db.prepare("SELECT * FROM tutorials WHERE filed_at IS NULL ORDER BY (stage = 'idea'), position, id").all() as any[]).map((t) => ({ title: t.title, stage: STAGE_NAMES[t.stage as Stage], has_outline: Boolean(t.outline) })),
     addIdea: (title: string, notes?: string) => addTutorial(title, { notes, source: "claude" }),
     saveOutline: (name: string, outline: string, create: boolean) => {
