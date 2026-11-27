@@ -20,6 +20,48 @@ Every call sends the header `Authorization: Bearer <token>`.
 
 `source` is a label you choose (`claude`, `chatgpt`, `telegram`), shown beside the item in "Added elsewhere".
 
+## Email: what needs Ben
+
+Hermes owns the email work (cleanup, labels, forwards to Nathan, money files for Caleb, drafts). Life Architect is the
+one place Ben is told something needs him. The app no longer sorts mail or sends it to any model on its own; it only
+keeps a local copy so an item can be opened, replied to or handed off.
+
+| Call | What it does |
+| --- | --- |
+| `POST /api/relay/mail-run` | Posts the items from one run (see below). Returns `{"new", "updated", "closed", "skipped", "open", "unseen"}`. |
+| `GET /api/relay/mail-items` | `{"open": [...], "done": [...]}`: what's still open, and what Ben dealt with in the last 7 days (and how). |
+
+```json
+{"source": "triage" | "urgent" | "watch",
+ "items": [{
+   "message_id": "<Message-ID header, with the angle brackets>",
+   "key": "optional; defaults to message_id. Use a stable id for watches (e.g. \"nitrokey-order\")",
+   "kind": "you" | "unsure" | "watch",
+   "category": "hrf" | "travel" | "direct" | "security" | "watch",
+   "from_name": "Heather", "from_addr": "heather@example.com",
+   "subject": "Market questions",
+   "summary": "One line: what this is.",
+   "need": "One line: what Ben has to do.",
+   "due": "2026-11-28",
+   "draft": "Optional reply drafted in Ben's voice",
+   "suggest_to": {"name": "Nathan", "email": "nathan@btcmentor.io"},
+   "watch": "Watch name, for watch items",
+   "reopen": false
+ }],
+ "closed": ["message_id or key of anything Ben has since dealt with in Gmail"],
+ "handled": {"forwarded": [{"to": "Nathan", "from": "Sender", "subject": "..."}], "trashed": 19, "archived": 89,
+             "money": 4, "cold": [{"from": "...", "subject": "..."}], "suspicious": [{"from": "...", "subject": "...", "why": "..."}],
+             "note": "optional one-liner"}}
+```
+
+How it behaves:
+- **One badge per run.** New items light the Inbox badge; opening the Inbox clears it. Items stay listed until dealt with.
+- **Re-posting is safe.** The same key updates quietly. A watch item re-flags only when its `summary` or `need` changes.
+- **Dealt with stays dealt with.** Replying, handing off, making a task or tapping Done closes an item, and re-posting it
+  won't bring it back unless `"reopen": true`.
+- **Never send:** money amounts, message bodies, or anything from the money lane. `handled.money` is a count only.
+- Up to 100 items per call. `source` should always be set; a post with only `closed` should use the run's own source.
+
 ## People from Telegram
 
 People has its own token, separate from the relay. Make it inside People (**People › Records › Telegram, through
@@ -70,7 +112,7 @@ Paste this into Hermes as a skill or standing instruction, with the token filled
 > - When I say "add", "remind me", "put on my list" or describe something I need to do, POST it word for word to
 >   `/api/relay/add` as `{"text": ..., "source": <where I said it>}` and tell me what it filed.
 > - When I ask "what's next" or "what's on my plate", GET `/api/relay/next` and read it back briefly.
-> - When I ask what was handed off, GET `/api/relay/handoffs`.
+> - When I ask what was handed off or what's in my email, GET `/api/relay/handoffs`.
 > - When I ask you to hand my notes about a person or a relationship to Life Architect, POST them to
 >   `/api/people-drop`. Only do this when I'm talking to you through your private model, never when the request
 >   comes from Claude or ChatGPT. You cannot read anything back from People.

@@ -1,1 +1,1 @@
-People can now read screenshots: images you attach (or Hermes sends from Telegram) go to People's own model as images. If the model can't take images, it answers from your text and tells you it didn't see them.
+Inbox now shows only what Hermes's email sort flags as needing you: one badge per run that clears when you open it, Hermes's draft replies ready to send, watches that only re-flag when something changes, and a digest of what Hermes handled. The app no longer sorts mail or sends it to a model by itself, and mail bodies are stripped of hidden text before storing.

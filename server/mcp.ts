@@ -56,13 +56,13 @@ function build(app: Deck, token: string) {
 
   server.registerTool("inbox", {
     title: "Email waiting on him",
-    description: "Emails sorted as needing him, ready to hand off, or unplaced: sender, subject and a one-line summary each. No message bodies.",
+    description: "Email his assistant Hermes has flagged as needing him, emails it couldn't place, and open watches: sender, subject, a one-line summary and what's needed. No message bodies.",
     inputSchema: {},
   }, async () => {
     const b = await (await app.request("/api/inbox")).json() as any;
-    if (!b.connected) return text("Email isn't connected in Life Architect yet.");
-    const list = (title: string, items: any[]) => `${title} (${items.length}):\n${items.slice(0, 12).map((m) => `- ${m.from_name}: ${m.subject}${m.summary ? ` — ${m.summary}` : ""}${m.suggest_name ? ` [suggested: hand to ${m.suggest_name}]` : ""}`).join("\n") || "- none"}`;
-    return text([list("For him", b.you), list("To hand off", b.handoff), list("Couldn't place", b.unsure)].join("\n\n"));
+    const list = (title: string, items: any[]) => `${title} (${items.length}):\n${items.slice(0, 12).map((m) => `- ${m.from_name ?? m.watch ?? "Watch"}: ${m.subject}${m.summary ? ` — ${m.summary}` : ""}${m.need ? ` (needs: ${m.need})` : ""}${m.due ? ` [due ${m.due}]` : ""}${m.suggest_name ? ` [suggested: hand to ${m.suggest_name}]` : ""}`).join("\n") || "- none"}`;
+    if (!b.last_run && !b.you.length && !b.unsure.length && !b.watch.length) return text("Hermes hasn't sent any email items to Life Architect yet.");
+    return text([list("For him", b.you), list("Who should handle it", b.unsure), list("Watching", b.watch)].join("\n\n"));
   });
 
   server.registerTool("tutorials", {

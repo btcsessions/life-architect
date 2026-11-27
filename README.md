@@ -16,10 +16,10 @@ One deck for everything on your plate, served from your Umbrel and reached over 
   with notes, links and its outline, plus Bitcast prep from a rundown PDF with intro-hook takes. Line edit, YouTube
   prep and Bitcast prep are Hermes's own skills, triggered from here.
 - **Travel**: trips with flights, stay, costs, documents and a schedule you can send to Google Calendar.
-- **Inbox**: reads Gmail with an app password, sorts it (for you / hand off / couldn't place / nothing to do),
-  writes replies from what you say, and hands mail to people by email. Nothing is sent without a tap. It learns
-  who gets what; automatic hand-off is off until you switch it on in Settings, and then only for a sender you've
-  handed to the same person three times. Gmail itself is never changed.
+- **Inbox**: shows only what Hermes's email runs flag as needing you (for you, who handles this, watching), with one
+  badge per run that clears when you open it, plus a digest of what Hermes handled. Open an item to read it, send
+  Hermes's draft or say your own reply, hand it off, or make it a task. Nothing is sent without a tap. The app reads
+  Gmail with an app password only to open and answer these; it doesn't sort mail or send it to a model itself.
 - **Money** (PIN): import bank and card statements (PDF or CSV; PDFs are read on the Umbrel and shown for checking first), see where it goes, drill into categories, spot subscriptions.
   The Money model only ever sees merchant names.
   Money moving between your own accounts (chequing to savings, a card payment) is matched and counted as neither

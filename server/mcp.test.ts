@@ -44,7 +44,7 @@ describe("the connector Claude uses from the phone", () => {
     expect(added).toContain("Finish the YubiKey outline");
     expect(added).toContain("handed to Nathan");
     expect(said(await c.callTool({ name: "whats_next", arguments: {} }))).toContain("1. Finish the YubiKey outline");
-    expect(said(await c.callTool({ name: "inbox", arguments: {} }))).toContain("isn't connected");
+    expect(said(await c.callTool({ name: "inbox", arguments: {} }))).toContain("hasn't sent any email items");
     // People: refused here, and nothing lands in People's pile.
     expect(said(await c.callTool({ name: "do", arguments: { text: "People: Dana said she'd co-host" } }))).toContain("Not done");
     const cookie = (await app.request("/api/people/pin", { method: "POST", headers: J, body: JSON.stringify({ pin: "246810" }) })).headers.get("set-cookie")!.split(";")[0];
@@ -77,7 +77,8 @@ describe("the connector Claude uses from the phone", () => {
     expect(out).toContain("April works. Please hold the room.");
     expect(out).toContain("It has not been sent.");
     expect(sent).toHaveLength(0);
-    expect(said(await client.callTool({ name: "inbox", arguments: {} }))).toContain("Dana Test: Workshop dates");
+    await app.request("/api/relay/mail-run", { method: "POST", headers: { ...J, authorization: `Bearer ${token}` }, body: JSON.stringify({ items: [{ message_id: "<1@x>", from_name: "Dana Test", subject: "Workshop dates", need: "Pick a week" }] }) });
+    expect(said(await client.callTool({ name: "inbox", arguments: {} }))).toContain("Dana Test: Workshop dates (needs: Pick a week)");
     await client.close(); http.close();
   });
 });

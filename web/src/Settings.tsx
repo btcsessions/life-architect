@@ -149,10 +149,7 @@ export function SettingsPanel({ onClose, onSaved }: { onClose: () => void; onSav
             <input id="mail_from_name" type="text" value={val("mail_from_name")} onChange={set("mail_from_name")} />
           </label>
         </div>
-        <label className="check" htmlFor="mail_auto_delegate">
-          <input id="mail_auto_delegate" type="checkbox" checked={val("mail_auto_delegate") === "on"} onChange={(e) => setForm({ ...form, mail_auto_delegate: e.target.checked ? "on" : "" })} />
-          <span>Hand off automatically when a rule matches. Off: every hand-off waits for your tap.</span>
-        </label>
+        <p className="muted small">Sorting is done by Hermes's email runs, which post what needs you to the Inbox. This login is only used to open, reply to and hand off those emails.</p>
       </fieldset>
 
       <fieldset>

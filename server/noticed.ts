@@ -29,9 +29,8 @@ export function findPatterns(ctx: Ctx): Suggestion[] {
   // Email habits.
   const table = (n: string) => db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(n);
   if (table("mail_rules")) {
-    if (ctx.setting("mail_auto_delegate") !== "on") {
-      for (const r of db.prepare("SELECT * FROM mail_rules WHERE uses >= 3").all() as any[]) out.push({ key: `mailrule:${r.sender}`, text: `Email from ${r.sender} has gone to ${r.name} ${r.uses} times. Automatic hand-off (in Settings) would send these without a tap.`, task: `Turn on automatic email hand-off for ${r.sender} to ${r.name}` });
-    }
+    // A sender he keeps handing to the same person is a rule for Hermes's triage to forward on its own.
+    for (const r of db.prepare("SELECT * FROM mail_rules WHERE uses >= 3").all() as any[]) out.push({ key: `mailrule:${r.sender}`, text: `Email from ${r.sender} has gone to ${r.name} ${r.uses} times. Hermes's email sort could forward these on its own.`, task: `Ask Hermes to forward mail from ${r.sender} to ${r.name} in its email sort` });
     for (const r of db.prepare("SELECT from_addr, from_name, COUNT(*) AS n FROM mail WHERE handled_how = 'Cleared' GROUP BY from_addr HAVING n >= 4").all() as any[]) out.push({ key: `mailclear:${r.from_addr}`, text: `You've cleared ${r.n} emails from ${r.from_name} without acting. Unsubscribe, or have them skipped.`, task: `Unsubscribe from or filter ${r.from_name} <${r.from_addr}>` });
   }
   return out;

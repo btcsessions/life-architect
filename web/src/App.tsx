@@ -247,7 +247,7 @@ function Module(props: {
       {open && (
         <div className="module-body">
           {props.onOpenScreen && <button className="btn open-screen" onClick={props.onOpenScreen}>Open {SCREENS[area.id]}</button>}
-          {area.id === "inbox" && (area.mail ?? 0) > 0 && <p className="accent small">{area.mail} email{area.mail === 1 ? "" : "s"} waiting on you.</p>}
+          {area.id === "inbox" && (area.mail ?? 0) > 0 && <p className="accent small">{area.mail} new from Hermes's email sort.</p>}
           {area.id === "build" && <Noticed act={act} />}
           {area.locked ? (
             <p className="muted">{area.need > 0 ? "Something due. " : ""}Details are behind the People PIN.</p>
