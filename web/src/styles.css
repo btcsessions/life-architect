@@ -127,7 +127,8 @@ a { color: var(--electro); }
 .screen-title h1 { margin: 0; font: 400 clamp(34px, 6vw, 48px)/1 var(--font-title); letter-spacing: 0.03em; text-transform: uppercase; overflow-wrap: anywhere; }
 .screen-right { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .back { padding-left: 0; }
-.open-screen { margin-bottom: 12px; }
+.module-go { font-size: 26px; line-height: 1; color: var(--label-3); }
+.screen-tasks { padding: 16px 18px; margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
 .added { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .added li { display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
 .mic.small { width: 48px; height: 48px; }

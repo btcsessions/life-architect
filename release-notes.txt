@@ -1,1 +1,1 @@
-Inbox now shows only what Hermes's email sort flags as needing you: one badge per run that clears when you open it, Hermes's draft replies ready to send, watches that only re-flag when something changes, and a digest of what Hermes handled. The app no longer sorts mail or sends it to a model by itself, and mail bodies are stripped of hidden text before storing.
+Tapping Work, Trips, Inbox, Money or People on the deck now opens its screen straight away, no extra "Open" button. Trips, Inbox and People show that area's deck tasks at the bottom of the screen.

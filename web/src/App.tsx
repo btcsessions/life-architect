@@ -114,6 +114,8 @@ export function App() {
       {view === "money" && <Money onBack={back} onError={setError} />}
       {view === "people" && <People onBack={back} onError={setError} stt={Boolean(config?.stt)} />}
       {view === "inbox" && <Inbox onBack={back} onError={setError} stt={Boolean(config?.stt)} />}
+      {/* Work and Money list their own tasks; the other screens get the area's deck tasks underneath. */}
+      {deck && ["travel", "inbox", "people"].includes(view) && <ScreenTasks area={deck.areas.find((a) => a.id === view)} today={deck.today} act={act} />}
 
       {view === "deck" && deck && (
         <>
@@ -239,15 +241,15 @@ function Module(props: {
   const { area, today, open, editing, onToggle, onEdit, act } = props;
   return (
     <section className={open ? "card module open" : "card module"}>
-      <button className="module-head" aria-expanded={open} onClick={onToggle}>
+      {/* Areas with their own screen go straight there; the rest expand in place. */}
+      <button className="module-head" aria-expanded={props.onOpenScreen ? undefined : open} onClick={props.onOpenScreen ?? onToggle}>
         <span className="module-icon"><Icon d={area.locked ? ICONS.lock : ICONS[area.id] ?? ICONS.work} /></span>
         <span className="module-name">{area.name}</span>
         {area.need > 0 && <span className="badge" aria-label={`${area.need} need you`}>{area.need}</span>}
+        {props.onOpenScreen && <span className="module-go" aria-hidden="true">›</span>}
       </button>
-      {open && (
+      {open && !props.onOpenScreen && (
         <div className="module-body">
-          {props.onOpenScreen && <button className="btn open-screen" onClick={props.onOpenScreen}>Open {SCREENS[area.id]}</button>}
-          {area.id === "inbox" && (area.mail ?? 0) > 0 && <p className="accent small">{area.mail} new from Hermes's email sort.</p>}
           {area.id === "build" && <Noticed act={act} />}
           {area.locked ? (
             <p className="muted">{area.need > 0 ? "Something due. " : ""}Details are behind the People PIN.</p>
@@ -278,6 +280,28 @@ function Module(props: {
           )}
         </div>
       )}
+    </section>
+  );
+}
+
+function ScreenTasks({ area, today, act }: { area?: AreaView; today: string; act: (fn: () => Promise<unknown>) => void }) {
+  if (!area || area.locked || area.items.length === 0) return null;
+  return (
+    <section className="card screen-tasks">
+      <span className="eyebrow accent">{area.name} tasks · {area.items.length}</span>
+      <ul className="tasks">
+        {area.items.map((t) => (
+          <li key={t.id}>
+            <div className="task">
+              <input type="checkbox" aria-label={`Mark "${t.title}" done`} onChange={() => act(() => api.patch(t.id, { status: "done" }))} />
+              <span className="task-main">
+                <span className={t.needs_you ? "dot" : "ring"} aria-hidden="true" />
+                <span className="task-text"><span>{t.title}</span><span className="muted small">{taskMeta(t, today)}</span></span>
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
