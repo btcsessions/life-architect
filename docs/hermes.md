@@ -28,7 +28,7 @@ token (and so Claude's connector) still can't read anything in People.
 
 | Call | What it does |
 | --- | --- |
-| `POST /api/people-ask` with `{"text": "...", "source": "telegram"}` | The same as the "Ask or add" box: answers a question with guidance and files any context. Returns `{"reply", "did"}`. |
+| `POST /api/people-ask` with `{"text": "...", "source": "telegram", "images": [{"data": "<base64>", "type": "image/png"}]}` | The same as the "Ask or add" box: answers a question with guidance and files any context. `images` is optional (up to 4 screenshots, 8 MB each). Returns `{"reply", "did"}`. |
 | `GET /api/people-brief` | The current overall guidance: `{"text", "summary", "do_now", "points"}`. `text` is ready to read back. |
 | `POST /api/people-drop` | Also accepts the People token. |
 
@@ -36,11 +36,13 @@ Skill text for Hermes (only for your private model, with the People token filled
 
 > When I talk to you on Telegram about a person, a relationship, a date, or a social situation, POST my words to
 > http://btcsessions-life-architect_web_1:4600/api/people-ask as `{"text": ..., "source": "telegram"}` with the header
-> `Authorization: Bearer <People token>` and send me back the `reply`. When I ask "what's my people guidance" or
+> `Authorization: Bearer <People token>` and send me back the `reply`. If I send screenshots with it, include them in
+> `images` as base64 with their type. When I ask "what's my people guidance" or
 > "who do I need to reach out to", GET `/api/people-brief` and read me its `text`. Never use this token for a request
 > that came from Claude or ChatGPT.
 
-Screenshots sent on Telegram can't go through this call. Describe them, or paste the text, or add them in the app.
+Screenshots are sent to People's model as images. If that model, or a proxy in front of it, won't take images, the
+app asks again without them and the reply says it couldn't see the screenshot.
 
 ## The Work area: tutorials and Bitcast
 

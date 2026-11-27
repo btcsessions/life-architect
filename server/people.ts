@@ -83,6 +83,7 @@ Reply with ONLY a JSON object: {"reply": ..., "actions": [...]}.
  {"type":"thread","person":"<known name>","question":"an open question between them"},
  {"type":"fact","person":"<known name>","label":"e.g. Does, Likes, Avoid","value":"...","guess":true if you inferred it rather than being told},
  {"type":"next","person":"<known name>","what":"one concrete next step","when":"YYYY-MM-DD" or a named moment} (only when he agrees to one or asks you to set it).
+If images are attached (usually screenshots of a chat), read them. Put what they show into any note you file, with who said what in their exact words in quotation marks, so the record keeps it. Add "saw_images": true if you could read them, false if you couldn't (then say so in the reply).
 A pure question files nothing. Only file under a person in the known list; if a name is new or could be two people, ask before filing. Never invent details. Keep their exact quoted words in quotation marks.`;
 
 const BRIEF_RULES = `You guide one person on the relationships he's building and the social outcomes he's working toward. You get a short summary of each, keyed like [p:3] or [g:5].
@@ -603,12 +604,16 @@ export function mountPeople(app: Hono, ctx: Ctx) {
 
   /** Turn attachments into text the model can read. Images are kept as files: People's model can't see them. */
   async function readAttachments(files: File[]) {
-    const texts: string[] = [], images: number[] = [], names: string[] = [];
+    const texts: string[] = [], images: number[] = [], names: string[] = [], pictures: string[] = [];
     let budget = 30_000;
     for (const f of files.slice(0, 6)) {
       names.push(f.name || "file");
       const name = (f.name || "").toLowerCase();
-      if (f.type.startsWith("image/")) { images.push((await saveFile(ctx, f, "people")).id); continue; }
+      if (f.type.startsWith("image/")) {
+        images.push((await saveFile(ctx, f, "people")).id);
+        if (pictures.length < 4 && f.size <= 8 * 1024 * 1024) pictures.push(`data:${f.type};base64,${Buffer.from(await f.arrayBuffer()).toString("base64")}`);
+        continue;
+      }
       let text = "";
       if (f.type === "application/pdf" || name.endsWith(".pdf")) text = (await pdfLines(new Uint8Array(await f.arrayBuffer()))).map((l) => l.cells.map((x) => x.text).join(" ")).join("\n");
       else if (f.type.startsWith("text/") || /\.(md|markdown|txt|csv|json)$/.test(name)) text = await f.text();
@@ -617,7 +622,7 @@ export function mountPeople(app: Hono, ctx: Ctx) {
       budget -= text.length;
       if (text) texts.push(`Attached file "${f.name}":\n${text}`);
     }
-    return { texts, images, names };
+    return { texts, images, names, pictures };
   }
 
   /** The record for anyone named in what was said, so answers rest on what's known. */
@@ -663,10 +668,17 @@ export function mountPeople(app: Hono, ctx: Ctx) {
       ...recordFor([text, ...att.texts].join(" ")),
       chunks.length ? `Library passages:\n${chunks.map((x) => `[${x.id}] ${x.heading}: ${x.body.slice(0, 1000)}`).join("\n\n")}` : "",
     ].filter(Boolean).join("\n\n");
-    const message = [text || "(no message, just the attachments)", ...att.texts, att.images.length ? `(${att.images.length} image${att.images.length === 1 ? "" : "s"} attached that you can't see. If what's in it matters, ask him what it shows.)` : ""].filter(Boolean).join("\n\n");
-    let parsed: any;
+    const base = [text || "(no message, just the attachments)", ...att.texts].join("\n\n");
+    const blind = att.images.length ? `\n\n(${att.images.length} image${att.images.length === 1 ? "" : "s"} attached that you can't see. If what's in it matters, ask him what it shows.)` : "";
+    const send = (content: ChatMessage["content"]) => chat(cfg, [{ role: "system", content: `${ASK_RULES}\n\n${context}` }, ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.text })), { role: "user", content }], 180_000);
+    let parsed: any, sent = false;
     try {
-      parsed = extractJson(await chat(cfg, [{ role: "system", content: `${ASK_RULES}\n\n${context}` }, ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.text })), { role: "user", content: message }], 120_000));
+      // Screenshots go to the model as images. If it (or whatever sits in front of it) won't take them, ask again without.
+      if (att.pictures.length) {
+        try { parsed = extractJson(await send([{ type: "text", text: base }, ...att.pictures.map((url) => ({ type: "image_url" as const, image_url: { url } }))])); sent = true; }
+        catch { parsed = undefined; }
+      }
+      if (parsed === undefined) parsed = extractJson(await send(base + blind));
     } catch (e) {
       return toPile(`People's model didn't answer (${(e as Error).message}), so this went to Handed over to file later.`);
     }
@@ -698,6 +710,7 @@ export function mountPeople(app: Hono, ctx: Ctx) {
         did.push(`Next step set for ${p.name}`);
       }
     }
+    if (att.images.length && (!sent || parsed?.saw_images === false)) did.push(sent ? "The model couldn't read the image" : "The model can't take images, so it didn't see it");
     if (image !== null) { db.prepare("INSERT INTO inbox (ts, source, text, file_id) VALUES (?, ?, ?, ?)").run(now(), source.slice(0, 40), text || "(image)", image); did.push("Image saved to Handed over"); }
     const reply = typeof parsed?.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : did.length ? "Filed." : "I didn't file anything from that.";
     db.prepare("INSERT INTO chat (ts, role, text) VALUES (?, 'user', ?)").run(now(), said || "(attachments)");
@@ -776,8 +789,15 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     if (!linked(c)) return bad(c, "Wrong or missing People token.", 401);
     const b = (await c.req.json().catch(() => ({}))) as any;
     const text = String(b.text ?? "").trim().slice(0, 20_000);
-    if (!text) return bad(c, "Send what he said as \"text\".");
-    return c.json(await ask(text, [], clip(b.source ?? "telegram", 40) || "telegram"));
+    // Images as {"data": base64 or a data: URL, "type": "image/png", "name"?}, up to 4.
+    const files = (Array.isArray(b.images) ? b.images : []).slice(0, 4).flatMap((im: any, n: number) => {
+      const m = typeof im?.data === "string" ? im.data.match(/^(?:data:(image\/[\w.+-]+);base64,)?([A-Za-z0-9+/=\s]+)$/) : null;
+      const type = m?.[1] ?? (typeof im?.type === "string" && im.type.startsWith("image/") ? im.type : "image/jpeg");
+      const bytes = m ? Buffer.from(m[2], "base64") : null;
+      return bytes?.length && bytes.length <= 8 * 1024 * 1024 ? [new File([bytes], clip(im.name, 80) || `telegram-${n + 1}.${type.split("/")[1]}`, { type })] : [];
+    });
+    if (!text && !files.length) return bad(c, "Send what he said as \"text\", and any screenshots as \"images\".");
+    return c.json(await ask(text, files, clip(b.source ?? "telegram", 40) || "telegram"));
   });
   app.get("/api/people-brief", async (c) => {
     if (!linked(c)) return bad(c, "Wrong or missing People token.", 401);

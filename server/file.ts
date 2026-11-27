@@ -186,7 +186,9 @@ export interface ModelConfig {
   model: string;
 }
 
-export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+export type ChatPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+/** Content is plain text, or text plus images in the OpenAI format for models that can see them. */
+export type ChatMessage = { role: "system" | "user" | "assistant"; content: string | ChatPart[] };
 
 /**
  * POST without Node's built-in fetch. That fetch gives up on any answer that takes over 5 minutes to start

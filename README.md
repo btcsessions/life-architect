@@ -27,7 +27,8 @@ One deck for everything on your plate, served from your Umbrel and reached over 
   single-key or multisig descriptor; each receipt valued in CAD on the day it confirmed, and moves between your own wallets shown as transfers.
   Addresses are only sent to the address server you set, which should be your own node.
 - **People** (PIN): guidance first. The main page is an overall read, what to do now, and one box to ask a question
-  or drop in context (text, voice, pasted chats, screenshots, PDFs). Below it, each relationship or scenario is one
+  or drop in context (text, voice, pasted chats, screenshots, PDFs). Screenshots go to People's model as images when
+  it can see them. Below it, each relationship or scenario is one
   row that opens to its own guidance, with "Go deeper" for a fuller read. The detailed record (notes that can't be
   rewritten, quotes, details, open questions, readings, the research library) sits behind **Records** and fills
   itself in from what you tell it. It uses only its own model. The deck and the relay show "People: something due"

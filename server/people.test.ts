@@ -171,12 +171,35 @@ describe("people", () => {
       const r = await (await app.request("/api/people/ask", { method: "POST", headers: { cookie: h.cookie }, body: form })).json();
       expect(r.did).toEqual(["Note filed under Alex", "Next step set for Alex"]);
       expect(seen[0]).toContain("Alex: maybe thursday?");
-      expect(seen[0]).toContain("1 image attached that you can't see");
+      expect(seen[0]).toContain('"image_url":{"url":"data:image/png;base64,iVBORw=="}'); // the screenshot itself goes to the model
+      expect(seen).toHaveLength(1);
     } finally { restore(); }
     const view = await json("GET", `/api/people/persons/${a.id}`);
     expect(view.log[0]).toMatchObject({ kind: "screenshot" });
     expect(view.log[0].file_id).toBeTruthy();
     expect(view.goal).toMatchObject({ next_action: "Ask about Thursday", next_due: "2026-11-20" });
+  });
+
+  it("asks again without the image when the model won't take one, and says so; Hermes can send screenshots too", async () => {
+    const { app, json } = await setup();
+    await json("POST", "/api/people/persons", { name: "Alex", building_toward: "Closer" });
+    await app.request("/api/settings", { method: "PUT", headers: J, body: JSON.stringify({ people_llm_url: "http://maple/v1", people_llm_model: "deepseek" }) });
+    const { token } = await json("POST", "/api/people/link-token");
+    const seen: string[] = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init: any) => {
+      seen.push(init.body);
+      if (init.body.includes("image_url")) return new Response("no images here", { status: 400 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ reply: "What does it say?", actions: [] }) } }] }));
+    }) as typeof fetch;
+    try {
+      const r = await (await app.request("/api/people-ask", { method: "POST", headers: { ...J, authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: "What do I reply to Alex?", images: [{ data: "data:image/png;base64,iVBORw==" }] }) })).json();
+      expect(r.reply).toBe("What does it say?");
+      expect(r.did).toContain("The model can't take images, so it didn't see it");
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toContain("1 image attached that you can't see");
+    } finally { globalThis.fetch = real; }
   });
 
   it("leads with guidance: rules without a model, the model's brief with one, and anything due always on top", async () => {

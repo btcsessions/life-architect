@@ -1,1 +1,1 @@
-People is now guidance first: an overall read and what to do now on top, one box to ask or drop in context (text, voice, screenshots, PDFs), and a short list where each person or scenario opens to its own guidance and "Go deeper". The detailed records moved behind Records. Hermes can now ask People and read its guidance from Telegram with a separate People token.
+People can now read screenshots: images you attach (or Hermes sends from Telegram) go to People's own model as images. If the model can't take images, it answers from your text and tells you it didn't see them.
