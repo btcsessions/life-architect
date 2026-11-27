@@ -1,1 +1,1 @@
-YouTube prep: "Get it from Hermes" pulls in a prep Hermes already did (or refreshes the current one) without running anything again.
+People is now guidance first: an overall read and what to do now on top, one box to ask or drop in context (text, voice, screenshots, PDFs), and a short list where each person or scenario opens to its own guidance and "Go deeper". The detailed records moved behind Records. Hermes can now ask People and read its guidance from Telegram with a separate People token.

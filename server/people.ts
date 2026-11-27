@@ -1,19 +1,26 @@
-import { createHash } from "node:crypto";
 // People: the relationships you're building and the outcomes you're working toward.
 // Kept in its own database file, behind its own PIN, and only ever sent to People's own model.
 import type { Hono } from "hono";
 import Database from "better-sqlite3";
 import { join } from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Ctx } from "./app.ts";
 import { chat, extractJson, type ChatMessage } from "./file.ts";
 import { mountLock } from "./lock.ts";
 import { dataDir, saveFile, serve, type StoredFile } from "./files.ts";
+import { pdfLines } from "./pdf.ts";
 
 export const GRADES = ["O", "E", "C", "F", "?"] as const; // observed, established, clinical, folklore-that-works, contested
 const FACT_GRADES = ["O:ben", "O:sys", "O:inf"]; // he said it, taken from a capture, the model's guess
 export const OUTCOMES = ["hook", "close", "flake", "nothing"];
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+const quietText = (d: number | null) => (d === null ? "nothing recorded" : d === 0 ? "today" : d === 1 ? "yesterday" : `${d} days ago`);
+/** A bearer token compared in constant time. An unset token never matches. */
+function tokenIs(header: string | undefined, token: string | null): boolean {
+  const given = header?.replace(/^Bearer\s+/i, "") ?? "";
+  return Boolean(token) && given.length === token!.length && timingSafeEqual(Buffer.from(given), Buffer.from(token!));
+}
 
 /** Words inside quotation marks are kept verbatim as quotes. */
 export function quotesIn(text: string): string[] {
@@ -65,14 +72,34 @@ Reply with ONLY a JSON object with these keys, in this order:
 "no_quotes": true if the notes contain no direct quotes, else false. If true, say so in what_happened and ask for one.
 Rules: no praise. One qualifier per claim. Quote before inference. Tell them plainly if they are talking too long, hedging, or avoiding the ask.`;
 
-const TELL_RULES = `You keep a private record of the people in one person's life. They tell you things by text or voice.
-Reply with ONLY a JSON object: {"reply": a short plain reply (ask ONE question if you need something clarified, otherwise confirm what you filed),
-"actions": array of any of:
- {"type":"note","person":"<name exactly as in the known list>","text":"what happened, in their words","outcome":"hook"|"close"|"flake"|"nothing"|null},
+const ASK_RULES = `You are one person's private guide on the relationships he's building and the social outcomes he wants. You also keep the record behind it.
+He either asks you something, or hands you context (what happened, a pasted chat, a document, a screenshot), or both.
+Reply with ONLY a JSON object: {"reply": ..., "actions": [...]}.
+"reply": if he asked something, answer it directly: plain, specific, a little uncomfortable, no praise, no platitudes, at most 6 short sentences, ending with one concrete next step when there is one. If he only gave context, confirm in one line what you filed. If something essential is unclear (who a name is, what happened), ask ONE question.
+"actions": what to file, any of:
+ {"type":"note","person":"<name exactly as in the known list>","text":"what happened, in his words","outcome":"hook"|"close"|"flake"|"nothing"|null},
  {"type":"new_person","name":"...","how_met":"..." or null},
+ {"type":"goal","person":"<known name>","text":"what he wants this relationship to become"} (only when he says it),
  {"type":"thread","person":"<known name>","question":"an open question between them"},
- {"type":"fact","person":"<known name>","label":"e.g. Does, Likes, Avoid","value":"...","guess":true if you inferred it rather than being told}}
-Only file a note under a person in the known list. If a name is new or could be two people, ask which before filing. Never invent details. Keep their exact quoted words in quotation marks.`;
+ {"type":"fact","person":"<known name>","label":"e.g. Does, Likes, Avoid","value":"...","guess":true if you inferred it rather than being told},
+ {"type":"next","person":"<known name>","what":"one concrete next step","when":"YYYY-MM-DD" or a named moment} (only when he agrees to one or asks you to set it).
+A pure question files nothing. Only file under a person in the known list; if a name is new or could be two people, ask before filing. Never invent details. Keep their exact quoted words in quotation marks.`;
+
+const BRIEF_RULES = `You guide one person on the relationships he's building and the social outcomes he's working toward. You get a short summary of each, keyed like [p:3] or [g:5].
+Be specific and direct, a little uncomfortable; no praise, no platitudes, nothing generic. Use only what's given; where something is missing, say what to find out.
+Reply with ONLY a JSON object:
+{"summary": one or two sentences on the overall picture and what matters most right now,
+ "do_now": up to 3 objects {"what": one concrete action, "key": the item's key, "when": "YYYY-MM-DD" or a named moment}, only things that need doing in the next few days,
+ "points": up to 3 short guidance points across everything (patterns, what he's neglecting, where he's overinvesting),
+ "items": one object per item given: {"key": its key, "guidance": 1 to 3 short points specific to it, "next": one next step}}`;
+
+const GUIDE_RULES = `You guide one person on one relationship or one outcome he wants. You get the full record. Be specific and direct, a little uncomfortable; no praise, no platitudes.
+Reply with ONLY a JSON object:
+{"read": one or two sentences on where this really stands, quoting their words where it matters,
+ "points": 2 to 4 specific guidance points,
+ "watch_for": one sign that would change the approach,
+ "next": {"what": ONE concrete action, "when": "YYYY-MM-DD" or a named moment},
+ "words": {"text": exact wording lifted from a library passage provided, "source": that passage's id} or null if none fits}`;
 
 export function mountPeople(app: Hono, ctx: Ctx) {
   const path = process.env.LA_DB === ":memory:" || process.env.VITEST ? ":memory:" : join(dataDir(), "people.db");
@@ -101,6 +128,10 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     CREATE TRIGGER interaction_immutable BEFORE UPDATE OF text, ts, quotes, kind, source ON interaction BEGIN SELECT RAISE(ABORT, 'A filed record cannot be rewritten'); END;
     CREATE TABLE IF NOT EXISTS import_seen (hash TEXT PRIMARY KEY);`);
   if (!(db.prepare("PRAGMA table_info(person)").all() as Array<{ name: string }>).some((c) => c.name === "imported")) db.exec("ALTER TABLE person ADD COLUMN imported INTEGER NOT NULL DEFAULT 0");
+  // The guidance layer: one brief across everything, and a deeper guide per person or scenario when asked.
+  db.exec(`CREATE TABLE IF NOT EXISTS brief (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, basis TEXT NOT NULL, model TEXT NOT NULL, body TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guide (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, target TEXT NOT NULL, model TEXT NOT NULL, body TEXT NOT NULL);`);
+  if (!(db.prepare("PRAGMA table_info(inbox)").all() as Array<{ name: string }>).some((c) => c.name === "file_id")) db.exec("ALTER TABLE inbox ADD COLUMN file_id INTEGER");
   mountLock(app, ctx, "people");
 
   const now = () => ctx.now().toISOString();
@@ -170,8 +201,136 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     return out;
   }
 
+  // ---- The guidance layer
+  const inboxCount = () => (db.prepare("SELECT count(*) AS n FROM inbox WHERE status = 'new'").get() as any).n as number;
+  const openThreads = (pid: number) => (db.prepare("SELECT question FROM thread WHERE person_id = ? AND closed_at IS NULL ORDER BY id").all(pid) as any[]).map((t) => t.question as string);
+  const relGoal = (pid: number) => db.prepare("SELECT * FROM goal WHERE kind = 'relationship' AND person_id = ? AND status = 'open'").get(pid) as any;
+  const addDays = (n: number) => { const d = new Date(`${ctx.day()}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const clip = (s: unknown, n: number) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+
+  /** Everything being worked on, one row each: a relationship (keyed by person) or a scenario (keyed by goal). */
+  function items() {
+    const list = (db.prepare("SELECT * FROM goal WHERE status = 'open'").all() as any[]).map(goalView).filter((g) => g.kind === "scenario" || g.people.length).map((g) => {
+      const rel = g.kind === "relationship";
+      const cur = g.steps.find((s: any) => s.id === g.current_step);
+      return {
+        key: rel ? `p:${g.person_id}` : `g:${g.id}`, kind: g.kind as string, person_id: rel ? (g.person_id as number) : null, goal_id: g.id as number,
+        name: rel ? (g.people[0].name as string) : (g.title as string), about: rel ? (g.title as string) : ((g.done_looks_like as string | null) ?? ""),
+        stage: g.stage as string | null, next_action: g.next_action as string | null, next_due: g.next_due as string | null, days_quiet: g.days_quiet as number | null,
+        threads: rel ? openThreads(g.person_id) : [], step: cur ? `Step ${g.step_number} of ${g.steps.length}: ${cur.title}` : null, people: g.people.map((p: any) => p.name as string),
+      };
+    });
+    return list.sort((a, b) => (a.next_due ?? "9999").localeCompare(b.next_due ?? "9999") || (a.days_quiet ?? 9999) - (b.days_quiet ?? 9999));
+  }
+  type Item = ReturnType<typeof items>[number];
+
+  /** Changes whenever anything the brief is built from changes, and each new day. */
+  function basis() {
+    const q = (sql: string) => JSON.stringify(db.prepare(sql).all());
+    return createHash("sha256").update([ctx.day(), q("SELECT max(id) AS m, count(*) AS c FROM interaction"), q("SELECT max(id) AS m, count(*) AS c FROM fact"),
+      q("SELECT id, closed_at FROM thread"), q("SELECT id, name FROM person"), q("SELECT id, title, done_looks_like, stage, next_action, next_due, status FROM goal"),
+      q("SELECT id, done_at FROM step"), String(inboxCount())].join("|")).digest("hex");
+  }
+
+  /** Dated next moves due within a day: always on top, whatever the model says. */
+  const dueNow = (list: Item[]) => list.filter((i) => i.next_action && i.next_due && i.next_due <= addDays(1)).map((i) => ({ what: i.next_action!, when: i.next_due, key: i.key }));
+
+  /** The brief without a model: built from dates, silences and open questions. */
+  function rulesBrief(list: Item[]) {
+    const inbox = inboxCount();
+    const due = dueNow(list);
+    const noMove = list.filter((i) => !i.next_action);
+    const quietOnes = list.filter((i) => i.kind === "relationship" && (i.days_quiet ?? 0) >= 21);
+    const points = [
+      ...noMove.slice(0, 2).map((i) => `${i.name} has no next step. Decide one, even a small one.`),
+      ...quietOnes.slice(0, 2).map((i) => `${i.name} has been quiet ${i.days_quiet} days.`),
+    ].slice(0, 3);
+    const summary = !list.length ? "Nothing set up yet. Tell it about someone below and it'll start guiding."
+      : due.length ? `${due.length} thing${due.length === 1 ? "" : "s"} due. Start with: ${due[0].what}.`
+      : noMove.length ? `Nothing due. ${noMove.length} ${noMove.length === 1 ? "has" : "have"} no next step yet.` : "Nothing due right now.";
+    return {
+      summary, points,
+      do_now: [...due, ...(inbox ? [{ what: `Sort ${inbox} handed-over note${inbox === 1 ? "" : "s"}`, when: null, key: "inbox" }] : [])],
+      items: Object.fromEntries(list.map((i) => [i.key, {
+        guidance: [...i.threads.slice(0, 2).map((t) => `Open: ${t}`), ...(i.kind === "relationship" && (i.days_quiet ?? 0) >= 21 ? [`Quiet for ${i.days_quiet} days.`] : []), ...(i.step ? [i.step] : [])].slice(0, 3),
+        next: i.next_action ? `${i.next_action}${i.next_due ? ` (${i.next_due})` : ""}` : "Decide a next step",
+      }])),
+    };
+  }
+
+  /** Pull a stored brief into shape against what exists now, with anything due always first. */
+  function shapeBrief(raw: any, list: Item[]) {
+    const keys = new Set([...list.map((i) => i.key), "inbox"]);
+    const due = dueNow(list);
+    const model = (Array.isArray(raw.do_now) ? raw.do_now : []).filter((d: any) => d?.what && keys.has(d.key) && !due.some((x) => x.key === d.key));
+    const named = (key: string) => (key === "inbox" ? null : list.find((i) => i.key === key));
+    return {
+      summary: clip(raw.summary, 400), points: (Array.isArray(raw.points) ? raw.points : []).slice(0, 3).map((p: unknown) => clip(p, 300)).filter(Boolean),
+      do_now: [...due, ...model].slice(0, 4).map((d: any) => {
+        const it = named(d.key);
+        return { what: clip(d.what, 300), when: d.when ? clip(d.when, 40) : null, key: d.key, who: it?.name ?? null, goal_id: it?.goal_id ?? null, is_next: Boolean(it && it.next_action === d.what) };
+      }),
+      items: Object.fromEntries(Object.entries(raw.items ?? {}).filter(([k]) => keys.has(k))),
+    };
+  }
+
+  function material(list: Item[]) {
+    const lines = list.slice(0, 30).map((i) => {
+      const notes = i.kind === "relationship"
+        ? (db.prepare("SELECT ts, text, outcome FROM interaction WHERE person_id = ? ORDER BY ts DESC, id DESC LIMIT 3").all(i.person_id) as any[])
+        : (db.prepare("SELECT i.ts, i.text, i.outcome, p.name FROM interaction i JOIN person p ON p.id = i.person_id WHERE i.goal_id = ? ORDER BY i.ts DESC, i.id DESC LIMIT 3").all(i.goal_id) as any[]);
+      const facts = i.person_id ? (db.prepare("SELECT label, value FROM fact WHERE person_id = ? ORDER BY id DESC LIMIT 6").all(i.person_id) as any[]) : [];
+      return [
+        `[${i.key}] ${i.kind === "relationship" ? `${i.name}, building toward: ${i.about}` : `Scenario: ${i.name}${i.about ? `. Done looks like: ${i.about}` : ""}. With: ${i.people.join(", ") || "no one named"}`}`,
+        i.stage ? `Where it is: ${i.stage}` : "", i.step ?? "",
+        `Next move: ${i.next_action ? `${i.next_action}${i.next_due ? ` (due ${i.next_due})` : ""}` : "none set"}`,
+        i.kind === "relationship" ? `Last contact: ${i.days_quiet === null ? "nothing recorded" : `${i.days_quiet} days ago`}` : "",
+        i.threads.length ? `Open questions: ${i.threads.join("; ")}` : "",
+        facts.length ? `Details: ${facts.map((f) => `${f.label}: ${f.value}`).join("; ")}` : "",
+        notes.length ? `Recent notes, newest first:\n${notes.map((n) => `- ${n.ts.slice(0, 10)}${n.outcome ? ` [${n.outcome}]` : ""}${n.name ? ` ${n.name}:` : ""} ${clip(n.text, 400)}`).join("\n")}` : "No notes yet.",
+      ].filter(Boolean).join("\n");
+    });
+    const inbox = inboxCount();
+    return [`Today is ${ctx.day()}.`, inbox ? `Unsorted notes waiting to be filed: ${inbox} (key "inbox").` : "", ...lines].filter(Boolean).join("\n\n");
+  }
+
+  let building: Promise<void> | null = null;
+  /** Ask People's model for a fresh brief and keep it. Only one runs at a time. */
+  function buildBrief(): Promise<void> {
+    const cfg = ctx.modelFor("people_llm");
+    if (!cfg) return Promise.resolve();
+    if (building) return building;
+    building = (async () => {
+      const list = items();
+      const b = basis();
+      if (!list.length) { db.prepare("INSERT INTO brief (ts, basis, model, body) VALUES (?, ?, 'rules', ?)").run(now(), b, JSON.stringify(rulesBrief(list))); return; }
+      const raw: any = extractJson(await chat(cfg, [{ role: "system", content: BRIEF_RULES }, { role: "user", content: material(list) }], 120_000));
+      if (!raw || typeof raw.summary !== "string") throw new Error("it answered in the wrong shape");
+      const known = new Set(list.map((i) => i.key));
+      const byKey: Record<string, { guidance: string[]; next: string }> = {};
+      for (const it of Array.isArray(raw.items) ? raw.items : []) {
+        if (!known.has(it?.key)) continue;
+        byKey[it.key] = { guidance: (Array.isArray(it.guidance) ? it.guidance : []).slice(0, 3).map((g: unknown) => clip(g, 300)).filter(Boolean), next: clip(it.next, 300) };
+      }
+      const body = { summary: raw.summary, points: raw.points, do_now: raw.do_now, items: byKey };
+      db.prepare("INSERT INTO brief (ts, basis, model, body) VALUES (?, ?, ?, ?)").run(now(), b, cfg.model, JSON.stringify(body));
+      db.prepare("DELETE FROM brief WHERE id NOT IN (SELECT id FROM brief ORDER BY id DESC LIMIT 20)").run();
+    })().finally(() => { building = null; });
+    return building;
+  }
+
+  /** The brief as it stands: the model's latest if there is one, otherwise the rules. */
+  function currentBrief() {
+    const list = items();
+    const hasModel = Boolean(ctx.modelFor("people_llm"));
+    const latest = hasModel ? (db.prepare("SELECT * FROM brief ORDER BY id DESC LIMIT 1").get() as any) : null;
+    const raw = latest ? JSON.parse(latest.body) : rulesBrief(list);
+    return { list, brief: { ...shapeBrief(raw, list), ts: latest?.ts ?? null, by: latest ? (latest.model === "rules" ? "rules" : "model") : "rules", building: Boolean(building) }, stale: hasModel && (!latest || latest.basis !== basis()) };
+  }
+
   // ---- Home
   app.get("/api/people/home", (c) => {
+    const { list, brief, stale: briefStale } = currentBrief();
     const goals = (db.prepare("SELECT * FROM goal WHERE status = 'open' ORDER BY next_due IS NULL, next_due, id").all() as any[]).map(goalView);
     const stale = (db.prepare("SELECT * FROM person").all() as any[]).map((p) => ({ id: p.id, name: p.name, days: daysSince(lastSeen(p.id)) })).filter((p) => p.days !== null && p.days >= 21);
     const next = goals.find((g) => g.next_action && g.next_due) ?? null;
@@ -186,7 +345,32 @@ export function mountPeople(app: Hono, ctx: Ctx) {
         FROM person p WHERE NOT EXISTS (SELECT 1 FROM goal g WHERE g.person_id = p.id AND g.status = 'open')
         AND NOT EXISTS (SELECT 1 FROM goal_people gp JOIN goal g ON g.id = gp.goal_id WHERE gp.person_id = p.id AND g.status = 'open') ORDER BY notes DESC, p.name`).all(),
       stale, has_model: Boolean(ctx.modelFor("people_llm")), outcomes: OUTCOMES,
+      items: list, brief, brief_stale: briefStale,
+      chat: (db.prepare("SELECT * FROM chat ORDER BY id DESC LIMIT 2").all() as any[]).reverse(),
+      linked: Boolean(ctx.secret.get("people_token")),
     });
+  });
+
+  app.post("/api/people/brief", async (c) => {
+    if (!ctx.modelFor("people_llm")) return bad(c, "Set a model for People in Settings to get guidance written for you.");
+    try { await buildBrief(); } catch (e) { return bad(c, `People's model didn't help: ${(e as Error).message}.`, 502); }
+    return c.json({ ok: true });
+  });
+
+  // Done with a next step: logged as a note, and cleared if it was the one set.
+  app.post("/api/people/goals/:id/did", async (c) => {
+    const g = goal(Number(c.req.param("id")));
+    if (!g) return bad(c, "No such goal.", 404);
+    const b = (await c.req.json().catch(() => ({}))) as any;
+    const what = clip(b.what, 300) || g.next_action;
+    if (!what) return bad(c, "What did you do?");
+    const pid = g.kind === "relationship" ? g.person_id : (db.prepare("SELECT person_id FROM goal_people WHERE goal_id = ? LIMIT 1").get(g.id) as any)?.person_id;
+    if (pid) addInteraction(pid, `Done: ${what}`, { kind: "done", goal_id: g.kind === "scenario" ? g.id : null });
+    if (g.next_action && (!b.what || g.next_action === b.what)) {
+      db.prepare("UPDATE goal SET next_action = NULL, next_due = NULL WHERE id = ?").run(g.id);
+      syncTask(goal(g.id));
+    }
+    return c.json({ ok: true });
   });
 
   // ---- People and what you're building with them
@@ -341,6 +525,7 @@ export function mountPeople(app: Hono, ctx: Ctx) {
     } else b = (await c.req.json().catch(() => ({}))) as any;
     const p = person(Number(b.person_id));
     if (!p) return bad(c, "Pick who this is about.");
+    if (!fileId && b.inbox_id) fileId = (db.prepare("SELECT file_id FROM inbox WHERE id = ?").get(Number(b.inbox_id)) as any)?.file_id ?? null;
     const text = String(b.text ?? "").trim();
     if (!text && !fileId) return bad(c, "Say what happened.");
     const id = addInteraction(p.id, text || "(screenshot, not yet written up)", { kind: fileId ? "screenshot" : b.kind === "voice" ? "voice" : "note", outcome: b.outcome, goal_id: b.goal_id ? Number(b.goal_id) : null, file_id: fileId, corrects_id: b.corrects_id ? Number(b.corrects_id) : null });
@@ -375,9 +560,8 @@ export function mountPeople(app: Hono, ctx: Ctx) {
 
   // ---- Handed over from Hermes: write-only from outside, read only in here.
   app.post("/api/people-drop", async (c) => {
-    const token = ctx.secret.get("relay_token");
-    const given = c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
-    if (!token || given.length !== token.length || !timingSafeEqual(Buffer.from(given), Buffer.from(token))) return bad(c, "Wrong or missing relay token.", 401);
+    const auth = c.req.header("authorization");
+    if (!tokenIs(auth, ctx.secret.get("relay_token")) && !tokenIs(auth, ctx.secret.get("people_token"))) return bad(c, "Wrong or missing relay token.", 401);
     const b = (await c.req.json().catch(() => ({}))) as any;
     const items = Array.isArray(b.items) ? b.items : [b.text ?? b];
     const r = handOver(items.slice(0, 2000), String(b.source ?? "hermes"));
@@ -414,24 +598,80 @@ export function mountPeople(app: Hono, ctx: Ctx) {
   });
   app.delete("/api/people/library", (c) => c.json({ removed: db.prepare("DELETE FROM library WHERE doc = ?").run(c.req.query("doc") ?? "").changes }));
 
-  // ---- Tell it: a chat that files what you say
+  // ---- Ask or add: one box that answers questions and files context. The app, and Hermes through the People link.
   app.get("/api/people/chat", (c) => c.json({ messages: (db.prepare("SELECT * FROM chat ORDER BY id DESC LIMIT 40").all() as any[]).reverse() }));
-  app.post("/api/people/tell", async (c) => {
+
+  /** Turn attachments into text the model can read. Images are kept as files: People's model can't see them. */
+  async function readAttachments(files: File[]) {
+    const texts: string[] = [], images: number[] = [], names: string[] = [];
+    let budget = 30_000;
+    for (const f of files.slice(0, 6)) {
+      names.push(f.name || "file");
+      const name = (f.name || "").toLowerCase();
+      if (f.type.startsWith("image/")) { images.push((await saveFile(ctx, f, "people")).id); continue; }
+      let text = "";
+      if (f.type === "application/pdf" || name.endsWith(".pdf")) text = (await pdfLines(new Uint8Array(await f.arrayBuffer()))).map((l) => l.cells.map((x) => x.text).join(" ")).join("\n");
+      else if (f.type.startsWith("text/") || /\.(md|markdown|txt|csv|json)$/.test(name)) text = await f.text();
+      else { images.push((await saveFile(ctx, f, "people")).id); continue; }
+      text = text.trim().slice(0, Math.max(0, budget));
+      budget -= text.length;
+      if (text) texts.push(`Attached file "${f.name}":\n${text}`);
+    }
+    return { texts, images, names };
+  }
+
+  /** The record for anyone named in what was said, so answers rest on what's known. */
+  function recordFor(text: string) {
+    const t = ` ${text.toLowerCase()} `;
+    const named = (db.prepare("SELECT * FROM person").all() as any[]).filter((p) => {
+      const full = p.name.toLowerCase(), first = full.split(/\s+/)[0];
+      return t.includes(full) || (first.length >= 3 && new RegExp(`[^a-z]${first.replace(/[^a-z]/g, "")}[^a-z]`).test(t));
+    }).slice(0, 4);
+    return named.map((p) => {
+      const g = relGoal(p.id);
+      const notes = db.prepare("SELECT ts, text, outcome FROM interaction WHERE person_id = ? ORDER BY ts DESC, id DESC LIMIT 6").all(p.id) as any[];
+      const facts = db.prepare("SELECT label, value FROM fact WHERE person_id = ? ORDER BY id DESC LIMIT 10").all(p.id) as any[];
+      return [`About ${p.name}${p.how_met ? ` (met: ${p.how_met})` : ""}:`, g ? `Building toward: ${g.title}${g.stage ? `. Where it is: ${g.stage}` : ""}. Next move: ${g.next_action ?? "none"}${g.next_due ? ` (${g.next_due})` : ""}` : "No goal set.",
+        openThreads(p.id).length ? `Open questions: ${openThreads(p.id).join("; ")}` : "", facts.length ? `Details: ${facts.map((f) => `${f.label}: ${f.value}`).join("; ")}` : "",
+        notes.length ? `Notes, newest first:\n${notes.map((n) => `- ${n.ts.slice(0, 10)}${n.outcome ? ` [${n.outcome}]` : ""}: ${clip(n.text, 600)}`).join("\n")}` : ""].filter(Boolean).join("\n");
+    });
+  }
+
+  function setNext(g: any, what: string, when: unknown) {
+    const due = DATE.test(String(when)) ? String(when) : null;
+    db.prepare("UPDATE goal SET next_action = ?, next_due = ? WHERE id = ?").run(due ? what.slice(0, 300) : `${what.slice(0, 250)} (${clip(when, 40) || "no date set"})`, due, g.id);
+    syncTask(goal(g.id));
+  }
+
+  async function ask(text: string, files: File[], source: string): Promise<{ reply: string; did: string[] }> {
+    const att = await readAttachments(files);
+    const said = [text, att.names.length ? `📎 ${att.names.join(", ")}` : ""].filter(Boolean).join("\n");
     const cfg = ctx.modelFor("people_llm");
-    if (!cfg) return bad(c, "Set a model for People in Settings to use this. Until then, add notes from a person's page.");
-    const b = (await c.req.json().catch(() => ({}))) as any;
-    const text = String(b.text ?? "").trim();
-    if (!text) return bad(c, "Say or type something first.");
+    const toPile = (why: string) => {
+      db.prepare("INSERT INTO inbox (ts, source, text, file_id) VALUES (?, ?, ?, ?)").run(now(), source.slice(0, 40), [text, ...att.texts].filter(Boolean).join("\n\n").slice(0, 20_000) || `(${att.names.join(", ")})`, att.images[0] ?? null);
+      return { reply: why, did: ["Saved to Handed over"] };
+    };
+    if (!cfg) return toPile("Saved to Handed over. Set a model for People in Settings and it will answer and file things for you.");
     const known = (db.prepare("SELECT name FROM person ORDER BY name").all() as any[]).map((p) => p.name);
     const history = (db.prepare("SELECT role, text FROM chat ORDER BY id DESC LIMIT 8").all() as any[]).reverse();
-    const messages: ChatMessage[] = [
-      { role: "system", content: `${TELL_RULES}\nKnown people: ${JSON.stringify(known)}` },
-      ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.text })),
-      { role: "user", content: text },
-    ];
+    const latest = db.prepare("SELECT body FROM brief ORDER BY id DESC LIMIT 1").get() as any;
+    const overview = latest ? JSON.parse(latest.body) : null;
+    const chunks = retrieve(db.prepare("SELECT id, doc, heading, body FROM library").all() as any[], [text, ...att.texts].join(" ").slice(0, 4000), 3);
+    const context = [
+      `Known people: ${JSON.stringify(known)}`, `Today is ${ctx.day()}.`,
+      overview?.summary ? `Current overview: ${overview.summary}${Array.isArray(overview.points) && overview.points.length ? ` Points: ${overview.points.join(" / ")}` : ""}` : "",
+      ...recordFor([text, ...att.texts].join(" ")),
+      chunks.length ? `Library passages:\n${chunks.map((x) => `[${x.id}] ${x.heading}: ${x.body.slice(0, 1000)}`).join("\n\n")}` : "",
+    ].filter(Boolean).join("\n\n");
+    const message = [text || "(no message, just the attachments)", ...att.texts, att.images.length ? `(${att.images.length} image${att.images.length === 1 ? "" : "s"} attached that you can't see. If what's in it matters, ask him what it shows.)` : ""].filter(Boolean).join("\n\n");
     let parsed: any;
-    try { parsed = extractJson(await chat(cfg, messages, 90_000)); } catch (e) { return bad(c, `People's model didn't help: ${(e as Error).message}.`, 502); }
+    try {
+      parsed = extractJson(await chat(cfg, [{ role: "system", content: `${ASK_RULES}\n\n${context}` }, ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.text })), { role: "user", content: message }], 120_000));
+    } catch (e) {
+      return toPile(`People's model didn't answer (${(e as Error).message}), so this went to Handed over to file later.`);
+    }
     const did: string[] = [];
+    let image: number | null = att.images[0] ?? null;
     for (const a of Array.isArray(parsed?.actions) ? parsed.actions.slice(0, 12) : []) {
       if (a?.type === "new_person" && typeof a.name === "string" && a.name.trim() && !byName(a.name)) {
         db.prepare("INSERT INTO person (name, how_met, created_at) VALUES (?, ?, ?)").run(a.name.trim().slice(0, 80), typeof a.how_met === "string" ? a.how_met.slice(0, 200) : null, now());
@@ -440,14 +680,112 @@ export function mountPeople(app: Hono, ctx: Ctx) {
       }
       const p = typeof a?.person === "string" ? byName(a.person) : null;
       if (!p) continue; // never file under a name that isn't already known
-      if (a.type === "note" && typeof a.text === "string" && a.text.trim()) { addInteraction(p.id, a.text, { kind: "chat", outcome: a.outcome, source: "app" }); did.push(`Note filed under ${p.name}`); }
-      else if (a.type === "thread" && typeof a.question === "string" && a.question.trim()) { db.prepare("INSERT INTO thread (person_id, question, opened_at) VALUES (?, ?, ?)").run(p.id, a.question.trim().slice(0, 300), now()); did.push(`Open question added for ${p.name}`); }
-      else if (a.type === "fact" && a.label && a.value) { db.prepare("INSERT INTO fact (person_id, label, value, grade, created_at) VALUES (?, ?, ?, ?, ?)").run(p.id, String(a.label).slice(0, 40), String(a.value).slice(0, 300), a.guess ? "O:inf" : "O:ben", now()); did.push(`${a.guess ? "Guess" : "Detail"} added for ${p.name}`); }
+      if (a.type === "note" && typeof a.text === "string" && a.text.trim()) {
+        addInteraction(p.id, a.text, { kind: image ? "screenshot" : "chat", outcome: a.outcome, source: source === "app" ? "app" : source, file_id: image });
+        image = null;
+        did.push(`Note filed under ${p.name}`);
+      } else if (a.type === "goal" && typeof a.text === "string" && a.text.trim() && !relGoal(p.id)) {
+        db.prepare("INSERT INTO goal (kind, person_id, title, created_at) VALUES ('relationship', ?, ?, ?)").run(p.id, a.text.trim().slice(0, 300), now());
+        did.push(`Now building toward something with ${p.name}`);
+      } else if (a.type === "thread" && typeof a.question === "string" && a.question.trim()) {
+        db.prepare("INSERT INTO thread (person_id, question, opened_at) VALUES (?, ?, ?)").run(p.id, a.question.trim().slice(0, 300), now());
+        did.push(`Open question added for ${p.name}`);
+      } else if (a.type === "fact" && a.label && a.value) {
+        db.prepare("INSERT INTO fact (person_id, label, value, grade, created_at) VALUES (?, ?, ?, ?, ?)").run(p.id, String(a.label).slice(0, 40), String(a.value).slice(0, 300), a.guess ? "O:inf" : "O:ben", now());
+        did.push(`${a.guess ? "Guess" : "Detail"} added for ${p.name}`);
+      } else if (a.type === "next" && typeof a.what === "string" && a.what.trim() && relGoal(p.id)) {
+        setNext(relGoal(p.id), a.what.trim(), a.when);
+        did.push(`Next step set for ${p.name}`);
+      }
     }
+    if (image !== null) { db.prepare("INSERT INTO inbox (ts, source, text, file_id) VALUES (?, ?, ?, ?)").run(now(), source.slice(0, 40), text || "(image)", image); did.push("Image saved to Handed over"); }
     const reply = typeof parsed?.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : did.length ? "Filed." : "I didn't file anything from that.";
-    db.prepare("INSERT INTO chat (ts, role, text) VALUES (?, 'user', ?)").run(now(), text);
+    db.prepare("INSERT INTO chat (ts, role, text) VALUES (?, 'user', ?)").run(now(), said || "(attachments)");
     db.prepare("INSERT INTO chat (ts, role, text) VALUES (?, 'assistant', ?)").run(now(), reply);
-    return c.json({ reply, did });
+    return { reply, did };
+  }
+
+  app.post("/api/people/ask", async (c) => {
+    let text = "", files: File[] = [];
+    if ((c.req.header("content-type") ?? "").includes("multipart/form-data")) {
+      const form = await c.req.formData();
+      text = String(form.get("text") ?? "");
+      files = form.getAll("file").filter((f): f is File => f instanceof File && f.size > 0);
+    } else text = String(((await c.req.json().catch(() => ({}))) as any).text ?? "");
+    text = text.trim().slice(0, 20_000);
+    if (!text && !files.length) return bad(c, "Say, type or attach something first.");
+    try { return c.json(await ask(text, files, "app")); } catch (e) { return bad(c, (e as Error).message); }
+  });
+
+  // ---- A deeper guide for one person or scenario, on request
+  function target(key: string) {
+    const [k, n] = [key.slice(0, 1), Number(key.slice(2))];
+    if (k === "p") { const p = person(n); return p ? { key, p, g: relGoal(p.id) } : null; }
+    const g = k === "g" ? goal(n) : null;
+    return g ? { key, p: null, g } : null;
+  }
+  const guideView = (r: any) => (r ? { id: r.id, ts: r.ts, model: r.model, ...JSON.parse(r.body) } : null);
+  app.get("/api/people/guide", (c) => c.json({ guide: guideView(db.prepare("SELECT * FROM guide WHERE target = ? ORDER BY id DESC LIMIT 1").get(c.req.query("key") ?? "")) }));
+  app.post("/api/people/guide", async (c) => {
+    const cfg = ctx.modelFor("people_llm");
+    if (!cfg) return bad(c, "Set a model for People in Settings to get deeper guidance.");
+    const t = target(String(((await c.req.json().catch(() => ({}))) as any).key ?? ""));
+    if (!t) return bad(c, "Pick a person or a scenario.", 404);
+    const view = t.g ? goalView(t.g) : null;
+    const notes = (t.p
+      ? db.prepare("SELECT ts, text, outcome, NULL AS name FROM interaction WHERE person_id = ? ORDER BY ts DESC, id DESC LIMIT 12").all(t.p.id)
+      : db.prepare("SELECT i.ts, i.text, i.outcome, p.name FROM interaction i JOIN person p ON p.id = i.person_id WHERE i.goal_id = ? ORDER BY i.ts DESC, i.id DESC LIMIT 12").all(t.g.id)) as any[];
+    const facts = t.p ? (db.prepare("SELECT label, value FROM fact WHERE person_id = ?").all(t.p.id) as any[]) : [];
+    const chunks = retrieve(db.prepare("SELECT id, doc, heading, body FROM library").all() as any[], `${notes.map((n) => n.text).join(" ")} ${t.g?.title ?? ""}`);
+    const material = [
+      t.p ? `Person: ${t.p.name}${t.p.how_met ? ` (met: ${t.p.how_met})` : ""}. Last contact: ${quietText(daysSince(lastSeen(t.p.id)))}.` : `Scenario: ${t.g.title}${t.g.done_looks_like ? `. Done looks like: ${t.g.done_looks_like}` : ""}. With: ${view!.people.map((x: any) => x.name).join(", ") || "no one named"}.`,
+      t.g ? `${t.g.kind === "relationship" ? "Building toward" : "Outcome"}: ${t.g.title}${t.g.stage ? `. Where it is: ${t.g.stage}` : ""}. Next move: ${t.g.next_action ?? "none"}${t.g.next_due ? ` (${t.g.next_due})` : ""}` : "No goal set yet.",
+      view?.steps.length ? `Steps: ${view.steps.map((s: any, i: number) => `${i + 1}. ${s.title}${s.done_at ? " (done)" : s.id === view.current_step ? " (current)" : ""}`).join("; ")}` : "",
+      t.p && openThreads(t.p.id).length ? `Open questions: ${openThreads(t.p.id).join("; ")}` : "",
+      facts.length ? `Details: ${facts.map((f) => `${f.label}: ${f.value}`).join("; ")}` : "",
+      notes.length ? `Notes, newest first:\n${notes.map((n) => `- ${n.ts.slice(0, 10)}${n.outcome ? ` [${n.outcome}]` : ""}${n.name ? ` ${n.name}:` : ""} ${clip(n.text, 700)}`).join("\n")}` : "No notes yet.",
+      chunks.length ? `Library passages:\n${chunks.map((x) => `[${x.id}] ${x.heading}: ${x.body.slice(0, 1200)}`).join("\n\n")}` : "Library passages: none relevant. Set \"words\" to null.",
+      `Today is ${ctx.day()}.`,
+    ].filter(Boolean).join("\n\n");
+    let body: any;
+    try { body = extractJson(await chat(cfg, [{ role: "system", content: GUIDE_RULES }, { role: "user", content: material }], 120_000)); } catch (e) { return bad(c, `People's model didn't help: ${(e as Error).message}.`, 502); }
+    if (!body || !Array.isArray(body.points)) return bad(c, "People's model answered in the wrong shape. Try again.", 502);
+    const shaped = {
+      read: clip(body.read, 500), points: body.points.slice(0, 4).map((p: unknown) => clip(p, 300)).filter(Boolean), watch_for: clip(body.watch_for, 300),
+      next: body.next?.what ? { what: clip(body.next.what, 300), when: body.next.when ? clip(body.next.when, 40) : null } : null,
+      words: body.words && chunks.some((x) => x.id === Number(body.words.source)) ? { text: clip(body.words.text, 600), source: Number(body.words.source) } : null, // a citation must point at a passage that was sent
+    };
+    const r = db.prepare("INSERT INTO guide (ts, target, model, body) VALUES (?, ?, ?, ?)").run(now(), t.key, cfg.model, JSON.stringify(shaped));
+    return c.json({ guide: guideView(db.prepare("SELECT * FROM guide WHERE id = ?").get(Number(r.lastInsertRowid))) });
+  });
+  app.post("/api/people/guide/:id/use", (c) => {
+    const r = guideView(db.prepare("SELECT * FROM guide WHERE id = ?").get(Number(c.req.param("id"))));
+    if (!r?.next) return bad(c, "That guide has no next step.", 404);
+    const t = target(String((db.prepare("SELECT target FROM guide WHERE id = ?").get(r.id) as any).target));
+    if (!t?.g) return bad(c, "Say what you want this to be first, then set a next step.");
+    setNext(t.g, r.next.what, r.next.when);
+    return c.json({ ok: true });
+  });
+
+  // ---- The People link: lets Hermes ask and add from Telegram. Its own token, made only from inside People.
+  app.get("/api/people/link-token", (c) => c.json({ set: Boolean(ctx.secret.get("people_token")) }));
+  app.post("/api/people/link-token", (c) => { const token = randomBytes(24).toString("hex"); ctx.secret.set("people_token", token); return c.json({ token }); });
+  app.delete("/api/people/link-token", (c) => { ctx.secret.set("people_token", null); return c.json({ ok: true }); });
+  const linked = (c: any) => tokenIs(c.req.header("authorization"), ctx.secret.get("people_token"));
+  app.post("/api/people-ask", async (c) => {
+    if (!linked(c)) return bad(c, "Wrong or missing People token.", 401);
+    const b = (await c.req.json().catch(() => ({}))) as any;
+    const text = String(b.text ?? "").trim().slice(0, 20_000);
+    if (!text) return bad(c, "Send what he said as \"text\".");
+    return c.json(await ask(text, [], clip(b.source ?? "telegram", 40) || "telegram"));
+  });
+  app.get("/api/people-brief", async (c) => {
+    if (!linked(c)) return bad(c, "Wrong or missing People token.", 401);
+    let cur = currentBrief();
+    if (cur.stale) { try { await buildBrief(); cur = currentBrief(); } catch { /* fall back to the last one */ } }
+    const { brief } = cur;
+    const text = [brief.summary, brief.do_now.length ? `Do now:\n${brief.do_now.map((d) => `- ${d.what}${d.who ? ` (${d.who})` : ""}${d.when ? `, ${d.when}` : ""}`).join("\n")}` : "", brief.points.length ? `Guidance:\n${brief.points.map((p: string) => `- ${p}`).join("\n")}` : ""].filter(Boolean).join("\n\n");
+    return c.json({ text, summary: brief.summary, do_now: brief.do_now.map(({ what, who, when }) => ({ what, who, when })), points: brief.points, written: brief.ts });
   });
 
   // ---- Readings

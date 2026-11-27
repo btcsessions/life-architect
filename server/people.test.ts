@@ -131,10 +131,12 @@ describe("people", () => {
     expect(home.unplaced).toHaveLength(0);
   });
 
-  it("files what you tell it, only under people it knows, using People's own model", async () => {
-    const { app, json, send } = await setup();
+  it("answers and files from one box, only under people it knows, using People's own model", async () => {
+    const { app, json } = await setup();
     await json("POST", "/api/people/persons", { name: "Alex" });
-    expect((await send("POST", "/api/people/tell", { text: "hi" })).status).toBe(400); // no model set
+    // No model yet: nothing is lost, it goes to Handed over.
+    expect(await json("POST", "/api/people/ask", { text: "Saw Alex at the gym" })).toMatchObject({ did: ["Saved to Handed over"] });
+    expect((await json("GET", "/api/people/home")).inbox).toBe(1);
     await app.request("/api/settings", { method: "PUT", headers: J, body: JSON.stringify({ llm_url: "http://deck/v1", llm_model: "opus", people_llm_url: "http://maple/v1", people_llm_model: "deepseek" }) });
     const seen: string[] = [];
     const restore = model(app, { reply: "Filed under Alex. Who is Jordan?", actions: [
@@ -143,15 +145,111 @@ describe("people", () => {
       { type: "fact", person: "Alex", label: "Likes", value: "Flat whites", guess: true },
     ] }, seen);
     try {
-      const r = await json("POST", "/api/people/tell", { text: "Coffee with Alex went well, and Jordan was there" });
+      const r = await json("POST", "/api/people/ask", { text: "Coffee with Alex went well, and Jordan was there" });
       expect(r.reply).toMatch(/Who is Jordan/);
       expect(r.did).toEqual(["Note filed under Alex", "Guess added for Alex"]);
       expect(seen[0]).toMatch(/^http:\/\/maple\/v1\/chat\/completions/); // never the deck's model
       expect(seen[0]).toContain('Known people: [\\"Alex\\"]');
+      expect(seen[0]).toContain("About Alex"); // a named person's record goes along, so answers rest on it
     } finally { restore(); }
     const home = await json("GET", "/api/people/home");
     expect(home.people).toHaveLength(1);
-    expect((await json("GET", "/api/people/chat")).messages).toHaveLength(2);
+    expect(home.chat.map((m: any) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("reads attached text for the model and files an image onto the note it was about", async () => {
+    const { app, json, h } = await setup();
+    const a = await json("POST", "/api/people/persons", { name: "Alex", building_toward: "Closer" });
+    await app.request("/api/settings", { method: "PUT", headers: J, body: JSON.stringify({ people_llm_url: "http://maple/v1", people_llm_model: "deepseek" }) });
+    const seen: string[] = [];
+    const restore = model(app, { reply: "Filed. Ask her Thursday.", actions: [{ type: "note", person: "Alex", text: "Chat screenshot from last night" }, { type: "next", person: "Alex", what: "Ask about Thursday", when: "2026-11-20" }] }, seen);
+    try {
+      const form = new FormData();
+      form.set("text", "Here's my chat with Alex, what do I say?");
+      form.append("file", new File(["Alex: maybe thursday?\nMe: sure"], "chat.txt", { type: "text/plain" }));
+      form.append("file", new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" }));
+      const r = await (await app.request("/api/people/ask", { method: "POST", headers: { cookie: h.cookie }, body: form })).json();
+      expect(r.did).toEqual(["Note filed under Alex", "Next step set for Alex"]);
+      expect(seen[0]).toContain("Alex: maybe thursday?");
+      expect(seen[0]).toContain("1 image attached that you can't see");
+    } finally { restore(); }
+    const view = await json("GET", `/api/people/persons/${a.id}`);
+    expect(view.log[0]).toMatchObject({ kind: "screenshot" });
+    expect(view.log[0].file_id).toBeTruthy();
+    expect(view.goal).toMatchObject({ next_action: "Ask about Thursday", next_due: "2026-11-20" });
+  });
+
+  it("leads with guidance: rules without a model, the model's brief with one, and anything due always on top", async () => {
+    const { app, json, send } = await setup();
+    const a = await json("POST", "/api/people/persons", { name: "Alex", building_toward: "Closer" });
+    await json("POST", "/api/people/persons", { name: "Sam", building_toward: "Business partner" });
+    let home = await json("GET", "/api/people/home");
+    const ga = home.items.find((i: any) => i.name === "Alex").goal_id;
+    await json("PATCH", `/api/people/goals/${ga}`, { next_action: "Call about the weekend", next_due: "2026-11-18" });
+    home = await json("GET", "/api/people/home");
+    expect(home.brief).toMatchObject({ by: "rules", do_now: [{ what: "Call about the weekend", who: "Alex", is_next: true }] });
+    expect(home.brief.summary).toMatch(/1 thing due/);
+    expect(home.brief_stale).toBe(false); // no model, nothing to refresh
+    expect(home.items.map((i: any) => i.name)).toEqual(["Alex", "Sam"]);
+
+    await app.request("/api/settings", { method: "PUT", headers: J, body: JSON.stringify({ people_llm_url: "http://maple/v1", people_llm_model: "deepseek" }) });
+    expect((await json("GET", "/api/people/home")).brief_stale).toBe(true);
+    const seen: string[] = [];
+    const restore = model(app, { summary: "Alex is warm; Sam is drifting.", points: ["You only reach out when you need something from Sam."],
+      do_now: [{ what: "Text Sam about lunch", key: `p:${home.items[1].person_id}`, when: "this week" }, { what: "Invented", key: "p:999" }],
+      items: [{ key: `p:${a.id}`, guidance: ["She answers fast when you name a time."], next: "Call about the weekend" }, { key: "p:999", guidance: ["nobody"], next: "x" }] }, seen);
+    try { expect((await send("POST", "/api/people/brief")).status).toBe(200); } finally { restore(); }
+    expect(seen[0]).toContain(`[p:${a.id}] Alex, building toward: Closer`);
+    home = await json("GET", "/api/people/home");
+    expect(home.brief_stale).toBe(false);
+    expect(home.brief.by).toBe("model");
+    expect(home.brief.summary).toBe("Alex is warm; Sam is drifting.");
+    expect(home.brief.do_now.map((d: any) => d.what)).toEqual(["Call about the weekend", "Text Sam about lunch"]); // due first, made-up key dropped
+    expect(home.brief.items[`p:${a.id}`].guidance).toEqual(["She answers fast when you name a time."]);
+    expect(home.brief.items["p:999"]).toBeUndefined();
+
+    // Doing it logs a note, clears the step, and the brief knows it's out of date.
+    await json("POST", `/api/people/goals/${ga}/did`, {});
+    home = await json("GET", "/api/people/home");
+    expect(home.brief_stale).toBe(true);
+    expect(home.items[0].next_action ?? home.items[1].next_action).toBeNull();
+    expect((await json("GET", `/api/people/persons/${a.id}`)).log[0]).toMatchObject({ text: "Done: Call about the weekend", kind: "done" });
+  });
+
+  it("goes deeper on one person on request, with a real citation, and can make it the next step", async () => {
+    const { app, json, send, h } = await setup();
+    const a = await json("POST", "/api/people/persons", { name: "Alex", building_toward: "Closer" });
+    await json("POST", "/api/people/interactions", { person_id: a.id, text: 'I kept hedging the ask. She said "just say what you want".' });
+    const form = new FormData();
+    form.set("file", new File(["# Asking plainly\nState the ask once, with a time. Do not hedge the ask.\n"], "asking.md", { type: "text/markdown" }));
+    await app.request("/api/people/library", { method: "POST", headers: { cookie: h.cookie }, body: form });
+    expect((await send("POST", "/api/people/guide", { key: `p:${a.id}` })).status).toBe(400); // no model
+    await app.request("/api/settings", { method: "PUT", headers: J, body: JSON.stringify({ people_llm_url: "http://maple/v1", people_llm_model: "deepseek" }) });
+    const restore = model(app, { read: "She asked you to be plain.", points: ["Stop hedging.", "Name a day."], watch_for: "If a plain ask is dodged too.", next: { what: "Ask her to dinner Saturday", when: "2026-11-21" }, words: { text: "State the ask once, with a time.", source: 1 } });
+    let g: any;
+    try { g = (await json("POST", "/api/people/guide", { key: `p:${a.id}` })).guide; } finally { restore(); }
+    expect(g).toMatchObject({ points: ["Stop hedging.", "Name a day."], words: { source: 1 } });
+    expect((await json("GET", `/api/people/guide?key=p:${a.id}`)).guide.id).toBe(g.id);
+    await json("POST", `/api/people/guide/${g.id}/use`);
+    expect((await json("GET", `/api/people/persons/${a.id}`)).goal).toMatchObject({ next_action: "Ask her to dinner Saturday", next_due: "2026-11-21" });
+  });
+
+  it("lets Hermes ask and read the brief over a People link made only from inside People", async () => {
+    const { app, json } = await setup();
+    await json("POST", "/api/people/persons", { name: "Alex", building_toward: "Closer" });
+    expect((await app.request("/api/people/link-token", { method: "POST" })).status).toBe(423); // not without the PIN
+    const { token: relay } = await (await app.request("/api/settings/relay-token", { method: "POST" })).json();
+    const { token } = await json("POST", "/api/people/link-token");
+    const ask = (t: string, body: unknown) => app.request("/api/people-ask", { method: "POST", headers: { ...J, authorization: `Bearer ${t}` }, body: JSON.stringify(body) });
+    expect((await ask(relay, { text: "hi" })).status).toBe(401); // the relay (and so Claude's connector) can't read People
+    expect((await app.request("/api/people-brief", { headers: { authorization: `Bearer ${relay}` } })).status).toBe(401);
+    expect(await (await ask(token, { text: "Saw Alex", source: "telegram" })).json()).toMatchObject({ did: ["Saved to Handed over"] });
+    const brief = await (await app.request("/api/people-brief", { headers: { authorization: `Bearer ${token}` } })).json();
+    expect(brief.text).toMatch(/Sort 1 handed-over note/);
+    // The link token can also drop notes in, like the relay.
+    expect((await app.request("/api/people-drop", { method: "POST", headers: { ...J, authorization: `Bearer ${token}` }, body: JSON.stringify({ text: "x" }) })).status).toBe(200);
+    await json("DELETE", "/api/people/link-token");
+    expect((await ask(token, { text: "hi" })).status).toBe(401);
   });
 
   it("produces a graded reading with a real citation, and won't accept it ungraded", async () => {

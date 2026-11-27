@@ -26,9 +26,12 @@ One deck for everything on your plate, served from your Umbrel and reached over 
   spending nor income. Bitcoin wallets can be added by public key (xpub, ypub, zpub): balances at today's price,
   single-key or multisig descriptor; each receipt valued in CAD on the day it confirmed, and moves between your own wallets shown as transfers.
   Addresses are only sent to the address server you set, which should be your own node.
-- **People** (PIN): relationships you're building and scenarios you're working toward, with notes that can't be
-  rewritten, word-for-word quotes, open questions, readings with graded claims, and a research library.
-  It uses only its own model. The deck and the relay show "People: something due" and nothing else.
+- **People** (PIN): guidance first. The main page is an overall read, what to do now, and one box to ask a question
+  or drop in context (text, voice, pasted chats, screenshots, PDFs). Below it, each relationship or scenario is one
+  row that opens to its own guidance, with "Go deeper" for a fuller read. The detailed record (notes that can't be
+  rewritten, quotes, details, open questions, readings, the research library) sits behind **Records** and fills
+  itself in from what you tell it. It uses only its own model. The deck and the relay show "People: something due"
+  and nothing else. Hermes can reach it from Telegram with a separate People token (see docs/hermes.md).
 - **Noticed** (under Build & Automate): suggestions when you repeat something often enough to automate.
 - **Claude from your phone**: a connector on port 4601 lets Claude add and do things by voice from anywhere.
   See [docs/claude-connector.md](docs/claude-connector.md).

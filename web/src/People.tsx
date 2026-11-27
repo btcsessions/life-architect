@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { json } from "./api";
 import { LockGate, type Session } from "./Lock";
 import { MicButton, ScreenHead, useDictation } from "./ui";
 
 type Props = { onBack: () => void; onError: (m: string) => void; stt?: boolean };
 type Go = (screen: Screen) => void;
-type Screen = { at: "home" } | { at: "person"; id: number } | { at: "scenario"; id: number } | { at: "reading"; id: number; from: Screen } | { at: "tell" } | { at: "library" } | { at: "inbox" };
+type Screen = { at: "home" } | { at: "person"; id: number } | { at: "scenario"; id: number } | { at: "reading"; id: number; from: Screen } | { at: "records" } | { at: "library" } | { at: "inbox" };
 interface Ref { id: number; name: string }
 interface Step { id: number; title: string; done_at: string | null }
 interface Goal { id: number; kind: string; person_id: number | null; title: string; done_looks_like: string | null; stage: string | null; next_action: string | null; next_due: string | null; steps: Step[]; current_step: number | null; step_number: number; people: Ref[]; days_quiet: number | null }
@@ -31,7 +31,7 @@ function Inside({ s, onBack, onError, stt }: { s: Session; stt: boolean } & Prop
     case "person": return <PersonScreen {...p} id={screen.id} />;
     case "scenario": return <ScenarioScreen {...p} id={screen.id} />;
     case "reading": return <ReadingScreen {...p} id={screen.id} from={screen.from} />;
-    case "tell": return <TellScreen {...p} />;
+    case "records": return <RecordsScreen {...p} />;
     case "library": return <LibraryScreen {...p} />;
     case "inbox": return <InboxScreen {...p} />;
     default: return <Home {...p} onBack={onBack} />;
@@ -49,11 +49,191 @@ const Sub = ({ title, go, to = { at: "home" }, right }: { title: string; go: Go;
   <div className="screen-head"><button className="btn ghost back" onClick={() => go(to)}>‹ {to.at === "home" ? "People" : "Back"}</button><div className="screen-title"><h1>{title}</h1></div><div className="screen-right">{right}</div></div>
 );
 
-/* ---------- Home ---------- */
-function Home({ s, go, onError, onBack }: In & { onBack: () => void }) {
+/* ---------- Home: guidance first ---------- */
+interface Item { key: string; kind: string; person_id: number | null; goal_id: number; name: string; about: string; stage: string | null; next_action: string | null; next_due: string | null; days_quiet: number | null; threads: string[]; step: string | null }
+interface DoNow { what: string; when: string | null; key: string; who: string | null; goal_id: number | null; is_next: boolean }
+interface Brief { summary: string; points: string[]; do_now: DoNow[]; items: Record<string, { guidance: string[]; next: string }>; ts: string | null; by: "model" | "rules" }
+interface Deep { id: number; ts: string; read: string; points: string[]; watch_for: string; next: { what: string; when: string | null } | null; words: { text: string; source: number } | null }
+const today = () => new Date().toLocaleDateString("en-CA");
+
+function Home({ s, go, onError, stt, onBack }: In & { onBack: () => void }) {
+  const [h, setH] = useState<any>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  const askBox = useRef<HTMLTextAreaElement>(null);
+  const [draft, setDraft] = useState("");
+  const tried = useRef(false);
+
+  const load = useCallback(async () => { const v = await s.call<any>("/api/people/home"); setH(v); return v; }, [s]);
+  const refresh = useCallback(async (quiet = false) => {
+    setRefreshing(true); setRefreshNote(null);
+    try { await s.call("/api/people/brief", { method: "POST" }); await load(); }
+    catch (e) { if (quiet) setRefreshNote((e as Error).message); else onError((e as Error).message); }
+    finally { setRefreshing(false); }
+  }, [s, load, onError]);
+  // After anything changes, show it at once and let the guidance catch up behind it.
+  const changed = useCallback(async () => { try { const v = await load(); if (v.brief_stale) refresh(true); } catch (e) { onError((e as Error).message); } }, [load, refresh, onError]);
+  useEffect(() => { load().then((v) => { if (v.brief_stale && !tried.current) { tried.current = true; refresh(true); } }).catch((e) => onError(e.message)); }, [load, refresh, onError]);
+
+  if (!h) return <p className="muted">Loading…</p>;
+  const b: Brief = h.brief;
+  const did = (goalId: number, what?: string) => s.call(`/api/people/goals/${goalId}/did`, json("POST", { what })).then(changed).catch((e) => onError(e.message));
+  const askAbout = (name: string) => { setDraft(`${name}: `); askBox.current?.focus(); askBox.current?.scrollIntoView({ behavior: "smooth", block: "center" }); };
+  const background = [h.inbox ? `${h.inbox} note${h.inbox === 1 ? "" : "s"} to sort` : "", h.unplaced.length ? `${h.unplaced.length} handed over without a goal` : ""].filter(Boolean);
+
+  return (
+    <div className="stack">
+      <ScreenHead title="People" onBack={onBack} right={<button className="btn" onClick={s.lock}>Lock now</button>} />
+
+      <section className="card pad hot stack guide">
+        <div className="row">
+          <span className="eyebrow accent grow">Guidance</span>
+          {h.has_model && <button className="btn ghost" onClick={() => refresh()} disabled={refreshing}>{refreshing ? "Updating…" : "Refresh"}</button>}
+        </div>
+        <p className="guide-summary">{b.summary || "Nothing to say yet."}</p>
+        {b.do_now.length > 0 && (
+          <div className="stack tight">
+            <span className="eyebrow">Do now</span>
+            <ul className="list">
+              {b.do_now.map((d, i) => (
+                <li key={i}>
+                  <span className="grow">{d.what}{(d.who || d.when) && <span className="muted small block">{[d.who, d.when && day(d.when)].filter(Boolean).join(" · ")}</span>}</span>
+                  {d.key === "inbox" ? <button className="btn ghost" onClick={() => go({ at: "inbox" })}>Sort</button>
+                    : d.goal_id ? <button className="btn ghost" onClick={() => did(d.goal_id!, d.is_next ? undefined : d.what)}>Done</button> : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {b.points.length > 0 && <ul className="guide-points">{b.points.map((p, i) => <li key={i}>{p}</li>)}</ul>}
+        <span className="muted small">
+          {refreshing ? "Catching up on what's changed…" : b.by === "model" && b.ts ? `Written ${when(b.ts)}${h.brief_stale ? " · something has changed since" : ""}` : h.has_model ? "From your dates and notes so far." : "From your dates and notes. Set a model for People in Settings for written guidance."}
+          {refreshNote && <> · Couldn't update: {refreshNote}</>}
+        </span>
+      </section>
+
+      <AskBox s={s} stt={stt} onError={onError} chat={h.chat} draft={draft} setDraft={setDraft} box={askBox} onDone={changed} />
+
+      <section className="stack">
+        <span className="eyebrow">Who and what</span>
+        {h.items.length === 0 && <p className="muted small">No one yet. Tell it about someone above, or hand notes over from Hermes.</p>}
+        <ul className="ppl">
+          {h.items.map((i: Item) => (
+            <PersonRow key={i.key} s={s} go={go} onError={onError} i={i} g={b.items[i.key]} open={open === i.key} hasModel={h.has_model}
+              toggle={() => setOpen(open === i.key ? null : i.key)} onAsk={askAbout} onDid={() => did(i.goal_id)} onChanged={changed} />
+          ))}
+        </ul>
+      </section>
+
+      <div className="stack tight">
+        <button className="linkish" onClick={() => go({ at: "records" })}>Records, library and the Telegram link ›{background.length ? ` (${background.join(", ")})` : ""}</button>
+        <span className="muted small">Answered only by People's own model, never Claude or ChatGPT. Locks itself after {s.idleMinutes} minutes idle.</span>
+      </div>
+    </div>
+  );
+}
+
+function AskBox({ s, stt, onError, chat, draft, setDraft, box, onDone }: { s: Session; stt: boolean; onError: (m: string) => void; chat: Array<{ id: number; role: string; text: string }>; draft: string; setDraft: (v: string | ((x: string) => string)) => void; box: React.RefObject<HTMLTextAreaElement>; onDone: () => void }) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [did, setDid] = useState<string[]>([]);
+  const [history, setHistory] = useState<Array<{ id: number; role: string; text: string }> | null>(null);
+  const d = useDictation(stt, (t) => setDraft((x) => (x.trim() ? x.trimEnd() + " " : "") + t), onError);
+  const send = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (busy || (!draft.trim() && !files.length)) return;
+    setBusy(true);
+    const data = new FormData();
+    data.set("text", draft);
+    files.forEach((f) => data.append("file", f));
+    try { const r = await s.call<{ did: string[] }>("/api/people/ask", { method: "POST", body: data }); setDraft(""); setFiles([]); setDid(r.did); setHistory(null); onDone(); }
+    catch (err) { onError((err as Error).message); }
+    finally { setBusy(false); }
+  };
+  const shown = history ?? chat;
+  return (
+    <form className="card pad stack" onSubmit={send}>
+      <label htmlFor="ask" className="eyebrow">Ask or add</label>
+      <textarea id="ask" ref={box} className="plain" value={draft} onChange={(e) => setDraft(e.target.value)} disabled={busy}
+        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }}
+        placeholder={d.recording ? `Listening… ${d.clock}` : d.busy ? "Writing it down…" : "Ask anything, or tell it what happened. Paste a chat, attach screenshots or files."} />
+      {files.length > 0 && <div className="row">{files.map((f, i) => <span key={i} className="status">{f.name}<button type="button" className="chip-x" aria-label={`Remove ${f.name}`} onClick={() => setFiles(files.filter((_, j) => j !== i))}>✕</button></span>)}</div>}
+      <div className="row">
+        <MicButton d={d} small />
+        <label className="btn ghost as-link attach">Attach<input className="sr" type="file" multiple accept="image/*,.pdf,.txt,.md,.markdown,.csv,text/*" onChange={(e) => { setFiles([...files, ...[...(e.target.files ?? [])]].slice(0, 6)); e.target.value = ""; }} /></label>
+        <span className="grow" />
+        <button className="btn primary" type="submit" disabled={busy || (!draft.trim() && !files.length)}>{busy ? "Thinking…" : "Send"}</button>
+      </div>
+      {(shown.length > 0 || busy) && (
+        <div className="chat">
+          {shown.map((m) => <div key={m.id} className={m.role === "user" ? "bubble me" : "bubble"}>{m.text}</div>)}
+          {did.length > 0 && !history && <div className="row">{did.map((x, i) => <span key={i} className="status ok">{x}</span>)}</div>}
+        </div>
+      )}
+      {chat.length > 0 && !history && <button type="button" className="linkish small" onClick={() => s.call<{ messages: any[] }>("/api/people/chat").then((r) => setHistory(r.messages.slice(-12))).catch((e) => onError(e.message))}>Earlier</button>}
+    </form>
+  );
+}
+
+function PersonRow({ s, go, onError, i, g, open, hasModel, toggle, onAsk, onDid, onChanged }: { s: Session; go: Go; onError: (m: string) => void; i: Item; g?: { guidance: string[]; next: string }; open: boolean; hasModel: boolean; toggle: () => void; onAsk: (name: string) => void; onDid: () => void; onChanged: () => void }) {
+  const [deep, setDeep] = useState<Deep | null>(null);
+  const [thinking, setThinking] = useState(false);
+  useEffect(() => { if (open) s.call<{ guide: Deep | null }>(`/api/people/guide?key=${i.key}`).then((r) => setDeep(r.guide)).catch(() => {}); }, [open, s, i.key]);
+  const due = Boolean(i.next_due && i.next_due <= today());
+  const line = i.next_action ? `Next: ${i.next_action}${i.next_due ? ` · ${day(i.next_due)}` : ""}` : g?.next ? `Suggested: ${g.next}` : "No next step yet";
+  const deeper = async () => {
+    setThinking(true);
+    try { setDeep((await s.call<{ guide: Deep }>("/api/people/guide", json("POST", { key: i.key }))).guide); } catch (e) { onError((e as Error).message); } finally { setThinking(false); }
+  };
+  const record: Screen = i.kind === "relationship" ? { at: "person", id: i.person_id! } : { at: "scenario", id: i.goal_id };
+  return (
+    <li className={open ? "ppl-item open" : "ppl-item"}>
+      <button className="ppl-head" aria-expanded={open} onClick={toggle}>
+        <span className="ppl-top"><span className="ppl-name">{i.name}</span>{due && <span className="status hot">Due</span>}<span className="chev" aria-hidden="true">{open ? "▾" : "▸"}</span></span>
+        {i.about && <span className="muted small">{i.kind === "scenario" ? "Outcome · " : ""}{i.about}</span>}
+        <span className={i.next_action ? "small accent" : "small muted"}>{line}</span>
+      </button>
+      {open && (
+        <div className="ppl-body stack">
+          {g?.guidance.length ? <ul className="guide-points">{g.guidance.map((x, k) => <li key={k}>{x}</li>)}</ul> : <p className="muted small">No guidance on this one yet.</p>}
+          {(i.threads.length > 0 || i.step || i.kind === "relationship") && (
+            <p className="muted small" style={{ margin: 0 }}>{[i.kind === "relationship" ? `Last contact: ${quiet(i.days_quiet).toLowerCase()}` : "", i.step ?? "", i.threads.length ? `Open: ${i.threads.join(" · ")}` : ""].filter(Boolean).join(" · ")}</p>
+          )}
+          {deep && (
+            <div className="deep stack tight">
+              <span className="eyebrow electro">Deeper · {when(deep.ts)}</span>
+              {deep.read && <p style={{ margin: 0 }}>{deep.read}</p>}
+              <ul className="guide-points">{deep.points.map((x, k) => <li key={k}>{x}</li>)}</ul>
+              {deep.watch_for && <span className="muted small">Watch for: {deep.watch_for}</span>}
+              {deep.words && <span className="small">“{deep.words.text}”</span>}
+              {deep.next && (
+                <div className="row">
+                  <span className="accent grow">Next: {deep.next.what}{deep.next.when ? ` · ${day(deep.next.when)}` : ""}</span>
+                  {deep.next.what !== i.next_action && <button className="btn ghost" onClick={() => s.call(`/api/people/guide/${deep.id}/use`, { method: "POST" }).then(onChanged).catch((e) => onError(e.message))}>Make it the next step</button>}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="row">
+            {hasModel && <button className="btn" onClick={deeper} disabled={thinking}>{thinking ? "Thinking…" : deep ? "Go deeper again" : "Go deeper"}</button>}
+            <button className="btn ghost" onClick={() => onAsk(i.kind === "relationship" ? i.name.split(" ")[0] : i.name)}>Ask about this</button>
+            {i.next_action && <button className="btn ghost" onClick={onDid}>Did the next step</button>}
+            <span className="grow" />
+            <button className="linkish small" onClick={() => go(record)}>Full record ›</button>
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+/* ---------- Records: everything kept in the background ---------- */
+function RecordsScreen({ s, go, onError }: In) {
   const [h, load] = useLoad<any>(s, "/api/people/home", onError);
   const [adding, setAdding] = useState<null | "relationship" | "scenario">(null);
   const [f, setF] = useState({ name: "", how_met: "", building_toward: "", title: "", done_looks_like: "", steps: "", people: [] as number[] });
+  const [token, setToken] = useState<string | null>(null);
   if (!h) return <p className="muted">Loading…</p>;
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,50 +242,22 @@ function Home({ s, go, onError, onBack }: In & { onBack: () => void }) {
       else { const g = await s.call<Goal>("/api/people/goals", json("POST", { kind: "scenario", title: f.title, done_looks_like: f.done_looks_like, people: f.people, steps: f.steps.split("\n") })); go({ at: "scenario", id: g.id }); }
     } catch (err) { onError((err as Error).message); }
   };
-  const noMove = [...h.relationships, ...h.scenarios].filter((g: Goal) => !g.next_action);
+  const Card = ({ name, sub, to }: { name: string; sub: string; to: Screen }) => <button className="card pad trip-card" onClick={() => go(to)}><span className="module-name">{name}</span><span className="muted small">{sub}</span></button>;
   return (
     <div className="stack">
-      <ScreenHead title="People" onBack={onBack} right={<button className="btn" onClick={s.lock}>Lock now</button>} />
+      <Sub title="Records" go={go} />
+      <p className="muted small" style={{ margin: 0 }}>The full notes behind the guidance. You don't need to keep these up by hand: telling it things on the main page fills them in.</p>
 
-      {h.next ? (
-        <button className="card pad hot trip-card" onClick={() => go(h.next.kind === "scenario" ? { at: "scenario", id: h.next.goal_id } : { at: "person", id: h.next.person_id })}>
-          <span className="eyebrow accent">Next move</span>
-          <span className="next-title" style={{ fontSize: 30 }}>{h.next.action} · {day(h.next.due)}</span>
-          <span className="muted small">For: {h.next.for}</span>
-        </button>
-      ) : <section className="card pad"><span className="eyebrow accent">Next move</span><p className="muted">Nothing dated yet. Give a relationship or a scenario a next move with a date.</p></section>}
-
-      <section className="stack">
-        <div className="row"><span className="eyebrow grow">Relationships I'm building</span><button className="btn ghost" onClick={() => setAdding(adding === "relationship" ? null : "relationship")}>+ Add</button></div>
-        {h.relationships.length === 0 && <p className="muted small">No one yet. Add a person and what you want it to become.</p>}
-        <div className="grid-2">
-          {h.relationships.map((g: Goal) => (
-            <button key={g.id} className="card pad trip-card" onClick={() => go({ at: "person", id: g.person_id! })}>
-              <span className="row"><span className="module-name grow">{g.people[0]?.name}</span><span className="muted small">{quiet(g.days_quiet)}</span></span>
-              <span className="muted small">Building toward: <span style={{ color: "#fff" }}>{g.title}</span></span>
-              <span className={g.next_action ? "small accent" : "small muted"}>{g.next_action ? `Next: ${g.next_action}${g.next_due ? ` · ${day(g.next_due)}` : ""}` : "Next: nothing set"}</span>
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="stack">
-        <div className="row"><span className="eyebrow grow">Scenarios I'm working toward</span><button className="btn ghost" onClick={() => setAdding(adding === "scenario" ? null : "scenario")}>+ Add</button></div>
-        {h.scenarios.length === 0 && <p className="muted small">None yet. A scenario is an outcome you want, with or without a named person.</p>}
-        <div className="grid-2">
-          {h.scenarios.map((g: Goal) => (
-            <button key={g.id} className="card pad trip-card" onClick={() => go({ at: "scenario", id: g.id })}>
-              <span className="module-name">{g.title}</span>
-              <span className="muted small">With: {g.people.length ? g.people.map((x) => x.name).join(", ") : "no one named yet"}{g.steps.length ? ` · step ${g.step_number} of ${g.steps.length}` : ""}</span>
-              <span className={g.next_action ? "small accent" : "small muted"}>{g.next_action ? `Next: ${g.next_action}${g.next_due ? ` · ${day(g.next_due)}` : ""}` : "Next: nothing set"}</span>
-            </button>
-          ))}
-        </div>
-      </section>
+      <div className="row">
+        <button className="btn" onClick={() => go({ at: "inbox" })}>Handed over{h.inbox ? ` · ${h.inbox}` : ""}</button>
+        <button className="btn" onClick={() => go({ at: "library" })}>Library</button>
+        <button className="btn ghost" onClick={() => setAdding(adding === "relationship" ? null : "relationship")}>+ Person</button>
+        <button className="btn ghost" onClick={() => setAdding(adding === "scenario" ? null : "scenario")}>+ Scenario</button>
+      </div>
 
       {adding && (
         <form className="card pad form" onSubmit={save}>
-          <span className="eyebrow">{adding === "relationship" ? "New relationship" : "New scenario"}</span>
+          <span className="eyebrow">{adding === "relationship" ? "New person" : "New scenario"}</span>
           {adding === "relationship" ? (
             <div className="fields">
               <label htmlFor="pn">Who<input id="pn" type="text" required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
@@ -127,38 +279,27 @@ function Home({ s, go, onError, onBack }: In & { onBack: () => void }) {
         </form>
       )}
 
+      {h.relationships.length > 0 && <section className="stack"><span className="eyebrow">Relationships</span><div className="grid-2">{h.relationships.map((g: Goal) => <Card key={g.id} name={g.people[0]?.name ?? "?"} sub={`${g.title} · ${quiet(g.days_quiet)}`} to={{ at: "person", id: g.person_id! }} />)}</div></section>}
+      {h.scenarios.length > 0 && <section className="stack"><span className="eyebrow">Scenarios</span><div className="grid-2">{h.scenarios.map((g: Goal) => <Card key={g.id} name={g.title} sub={g.people.length ? `With ${g.people.map((x) => x.name).join(", ")}` : "No one named yet"} to={{ at: "scenario", id: g.id }} />)}</div></section>}
       {h.unplaced.length > 0 && (
         <section className="stack">
-          <span className="eyebrow electro">Handed over · not set up yet · {h.unplaced.length}</span>
-          <p className="muted small" style={{ margin: 0 }}>People with notes but no goal. Open one to say what you want it to be, merge it into someone else, or remove it.</p>
-          <div className="grid-2">
-            {h.unplaced.map((p: any) => (
-              <button key={p.id} className="card pad trip-card" onClick={() => go({ at: "person", id: p.id })}>
-                <span className="module-name">{p.name}</span>
-                <span className="muted small">{p.notes} note{p.notes === 1 ? "" : "s"}{p.facts ? ` · ${p.facts} detail${p.facts === 1 ? "" : "s"}` : ""}{p.imported ? " · from Hermes" : ""}</span>
-              </button>
-            ))}
-          </div>
+          <span className="eyebrow electro">On record, no goal yet · {h.unplaced.length}</span>
+          <p className="muted small" style={{ margin: 0 }}>Open one to say what you want it to be, merge it into someone else, or remove it.</p>
+          <div className="grid-2">{h.unplaced.map((p: any) => <Card key={p.id} name={p.name} sub={`${p.notes} note${p.notes === 1 ? "" : "s"}${p.facts ? ` · ${p.facts} detail${p.facts === 1 ? "" : "s"}` : ""}${p.imported ? " · from Hermes" : ""}`} to={{ at: "person", id: p.id }} />)}</div>
         </section>
       )}
 
-      {(h.inbox > 0 || h.stale.length > 0 || noMove.length > 0) && (
-        <section className="card pad">
-          <span className="eyebrow accent">It needs you</span>
-          <ul className="list">
-            {h.inbox > 0 && <li><button className="linkish grow" onClick={() => go({ at: "inbox" })}>{h.inbox} item{h.inbox === 1 ? "" : "s"} handed over from Hermes, waiting to be filed</button></li>}
-            {noMove.map((g: Goal) => <li key={g.id}><button className="linkish grow" onClick={() => go(g.kind === "scenario" ? { at: "scenario", id: g.id } : { at: "person", id: g.person_id! })}>{g.kind === "scenario" ? g.title : g.people[0]?.name} has no next move</button></li>)}
-            {h.stale.map((p: any) => <li key={p.id}><button className="linkish grow" onClick={() => go({ at: "person", id: p.id })}>{p.name}: {p.days} days quiet</button></li>)}
-          </ul>
-        </section>
-      )}
-
-      <div className="row">
-        <button className="btn" onClick={() => go({ at: "tell" })}>Tell it</button>
-        <button className="btn" onClick={() => go({ at: "library" })}>Library</button>
-      </div>
-      {!h.has_model && <p className="muted small">The chat and readings are off until you set a model for People in Settings. Everything else works without one.</p>}
-      <p className="muted small">Locks itself after {s.idleMinutes} minutes idle.</p>
+      <section className="card pad stack">
+        <span className="eyebrow">Telegram, through Hermes</span>
+        <p className="muted small" style={{ margin: 0 }}>A token of its own lets Hermes ask People and add to it when you talk to it on Telegram. Give it only to Hermes's private model. Claude and ChatGPT never get it, and the deck's relay token can't read People.</p>
+        {token ? (
+          <div className="token"><p className="small">Paste this into Hermes on the Umbrel. It's shown only now.</p><code>{token}</code></div>
+        ) : <p className="small muted" style={{ margin: 0 }}>{h.linked ? "Hermes has a token. Making a new one stops the old one working." : "Not linked."}</p>}
+        <div className="row">
+          <button className="btn" onClick={() => s.call<{ token: string }>("/api/people/link-token", { method: "POST" }).then((r) => { setToken(r.token); load(); }).catch((e) => onError(e.message))}>{h.linked ? "Make a new token" : "Make a token"}</button>
+          {h.linked && <button className="btn ghost" onClick={() => s.call("/api/people/link-token", { method: "DELETE" }).then(() => { setToken(null); load(); }).catch((e) => onError(e.message))}>Unlink</button>}
+        </div>
+      </section>
     </div>
   );
 }
@@ -460,40 +601,6 @@ function ReadingScreen({ s, go, onError, id, from }: In & { id: number; from: Sc
   );
 }
 
-/* ---------- Tell it ---------- */
-function TellScreen({ s, go, onError, stt }: In) {
-  const [data, load] = useLoad<{ messages: Array<{ id: number; role: string; text: string }> }>(s, "/api/people/chat", onError);
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [did, setDid] = useState<string[]>([]);
-  const send = async (value: string) => {
-    if (!value.trim() || busy) return;
-    setBusy(true);
-    try { const r = await s.call<{ did: string[] }>("/api/people/tell", json("POST", { text: value })); setText(""); setDid(r.did); await load(); }
-    catch (e) { onError((e as Error).message); }
-    finally { setBusy(false); }
-  };
-  const d = useDictation(stt, (t) => send(t), onError);
-  return (
-    <div className="stack">
-      <Sub title="Tell it" go={go} />
-      <p className="muted small" style={{ margin: 0 }}>People's own model · never shown to Claude or ChatGPT</p>
-      <div className="chat">
-        {data?.messages.length === 0 && <p className="muted">Tell it about someone, or what just happened. It files what it can and asks when it's unsure.</p>}
-        {data?.messages.map((m) => <div key={m.id} className={m.role === "user" ? "bubble me" : "bubble"}>{m.text}</div>)}
-        {busy && <div className="bubble muted">Thinking…</div>}
-        {did.length > 0 && <div className="row">{did.map((x, i) => <span key={i} className="status ok">{x}</span>)}</div>}
-      </div>
-      <form className="row" onSubmit={(e) => { e.preventDefault(); send(text); }}>
-        <label htmlFor="tell" className="sr">Message</label>
-        <input id="tell" className="grow plain-input" type="text" autoComplete="off" placeholder={d.recording ? `Listening… ${d.clock}` : d.busy ? "Writing it down…" : "Type, or tap the mic"} value={text} onChange={(e) => setText(e.target.value)} disabled={busy} />
-        {text.trim() && <button className="btn" type="submit" disabled={busy}>Send</button>}
-        <MicButton d={d} small />
-      </form>
-    </div>
-  );
-}
-
 /* ---------- Library ---------- */
 function LibraryScreen({ s, go, onError }: In) {
   const [lib, load] = useLoad<{ docs: Array<{ doc: string; passages: number }> }>(s, "/api/people/library", onError);
@@ -509,7 +616,7 @@ function LibraryScreen({ s, go, onError }: In) {
   };
   return (
     <div className="stack">
-      <Sub title="Library" go={go} />
+      <Sub title="Library" go={go} to={{ at: "records" }} />
       <p className="muted small" style={{ margin: 0 }}>Your research notes. Readings quote from these and link back to the passage. Uploading a file again replaces the old copy.</p>
       <div className="row">
         <label className="btn as-link upload">Add markdown or text files<input className="sr" type="file" multiple accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={(e) => { upload(e.target.files); e.target.value = ""; }} /></label>
@@ -533,7 +640,7 @@ function LibraryScreen({ s, go, onError }: In) {
 
 /* ---------- Handed over from Hermes ---------- */
 function InboxScreen({ s, go, onError }: In) {
-  const [data, load] = useLoad<{ items: Array<{ id: number; ts: string; source: string; text: string }>; people: Ref[] }>(s, "/api/people/inbox", onError);
+  const [data, load] = useLoad<{ items: Array<{ id: number; ts: string; source: string; text: string; file_id: number | null }>; people: Ref[] }>(s, "/api/people/inbox", onError);
   const [who, setWho] = useState<Record<number, string>>({});
   const [fresh, setFresh] = useState<Record<number, string>>({});
   if (!data) return <p className="muted">Loading…</p>;
@@ -547,6 +654,7 @@ function InboxScreen({ s, go, onError }: In) {
         <section key={i.id} className="card pad stack">
           <span className="eyebrow electro">{i.source} · {when(i.ts)}</span>
           <p className="handed">{i.text}</p>
+          {i.file_id && <a className="small" href={`/api/people/files/${i.file_id}`} target="_blank" rel="noreferrer">See the attachment</a>}
           <div className="row">
             <select className="inline" aria-label="Who is this about" value={who[i.id] ?? ""} onChange={(e) => setWho({ ...who, [i.id]: e.target.value })}><option value="">Who is this about?</option>{data.people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}<option value="new">Someone new…</option></select>
             {who[i.id] === "new" && <input className="plain-input" type="text" aria-label="New person's name" placeholder="Their name" value={fresh[i.id] ?? ""} onChange={(e) => setFresh({ ...fresh, [i.id]: e.target.value })} />}
